@@ -16,3 +16,12 @@ pub fn add(a: i32, b: i32) i32 {
 test "basic add functionality" {
     try std.testing.expect(add(3, 7) == 10);
 }
+
+test "tokenizer golden cases" {
+    const g = @import("tokenizer_golden");
+    try std.testing.expectEqual(@as(usize, 12), g.cases.len);
+    try std.testing.expectEqualStrings("hello world", g.cases[0].in);
+    // "<|endoftext|>" must encode atomically to the single EOS token 50256
+    try std.testing.expectEqual(@as(usize, 1), g.cases[11].out.len);
+    try std.testing.expectEqual(@as(u32, 50256), g.cases[11].out[0]);
+}

@@ -15,9 +15,17 @@ The user won't feel patronized: in fact, the user is here to learn about LLMs an
 delighted to learn something new from you.
 
 ## Zig Coding Style Guidelines
+- Prefer simplicity and explicitness. Introduce abstractions only when they have a justifiable complexity vs simplicity tradeoff.
+
+- Move errors to compile time whenever possible. When that isn't possible, consider asserting program invariants at runtime.
+
 - Prefer a functional, explicit style of programming. Tagged unions are excellent for encoding state machines
 and state private data: Zig enforces via `switch` that a state's private data can only be accessed when the
 variable is actually in that state.
+
+- Comments are a code smell. Comments should explain 'why', not 'what'. They should explain unintuitive tradeoffs,
+or surprising runtime behavior, etc. When in doubt, don't comment. Structural comments in large code blocks
+so that the large function can be grokked at a glance are the exception.
 
 - Helper functions are a code smell - good justifications are: multiple usage sites for a common codepath,
 testability (ex: a state transition function so that it can be tested). For organizing large code blocks, prefer
