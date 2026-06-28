@@ -159,11 +159,20 @@ pub fn build(b: *std.Build) void {
         venv_python,
         "python/gen_ref_logits.py",
     });
+    // M3 activation goldens: per-stage taps + final logits as self-describing raw-f32 .bin files,
+    // written straight into src/generated/ (gitignored) and mmap'd by the forward-pass test.
+    // Slow (loads HF gpt2), so it lives only in the manual gen-goldens step, not the test path.
+    const gen_act_cmd = b.addSystemCommand(&.{
+        venv_python,
+        "python/gen_activation_goldens.py",
+        "src/generated",
+    });
     const gen_goldens_step = b.step("gen-goldens", "Regenerate all Python oracle files");
     gen_goldens_step.dependOn(&gen_tok_cmd.step);
     gen_goldens_step.dependOn(&gen_st_cmd.step);
     gen_goldens_step.dependOn(&gen_kernel_cmd.step);
     gen_goldens_step.dependOn(&gen_ref_cmd.step);
+    gen_goldens_step.dependOn(&gen_act_cmd.step);
 
     // Copy the cached golden outputs to a fixed, gitignored source path. Tests @import them
     // by relative path ("generated/…") instead of as build-graph named modules, so the same

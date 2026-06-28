@@ -28,6 +28,29 @@ pub fn matmul(x: []const f32, w: []const f32, b: []const f32, y: []f32, m: usize
 }
 
 // =================
+// === matmulBT ===
+//
+// y = x @ Wᵀ, no bias.  x:[M,K] row-major, W:[N,K] row-major (so Wᵀ is [K,N]), y:[M,N].
+// The one real transpose in GPT-2: the tied output projection reuses wte.weight [vocab, n_embd]
+// = [N, K] to score every token, i.e. logits = x @ wteᵀ. W's row n is the weight vector for
+// output n, so y[row,col] dots x's row with W's row `col`. Naive ijk.
+pub fn matmulBT(x: []const f32, w: []const f32, y: []f32, m: usize, k: usize, n: usize) void {
+    assert(x.len == m * k);
+    assert(w.len == n * k);
+    assert(y.len == m * n);
+
+    for (0..m) |row| {
+        for (0..n) |col| {
+            var acc: f32 = 0;
+            for (0..k) |i| {
+                acc += x[row * k + i] * w[col * k + i];
+            }
+            y[row * n + col] = acc;
+        }
+    }
+}
+
+// =================
 // === layernorm ===
 //
 // (row - mean) / sqrt(var + eps) * gamma + beta. Per-row; variance is BIASED (/D, not /(D-1)).
@@ -118,6 +141,19 @@ test "matmul golden" {
     var y: [golden.matmul.m * golden.matmul.n]f32 = undefined;
     matmul(&x, &w, &b, &y, golden.matmul.m, golden.matmul.k, golden.matmul.n);
 
+    for (expected, y) |e, a| try std.testing.expectApproxEqAbs(e, a, tol);
+}
+
+test "matmulBT hand-computed" {
+    // x:[2,3], W:[2,3] (so Wᵀ is [3,2]); y = x @ Wᵀ is [2,2], no bias.
+    //   x = [[1,2,3],[4,5,6]],  W = [[1,0,-1],[2,2,2]]
+    //   y[0,0] = 1*1 + 2*0 + 3*-1 = -2     y[0,1] = 1*2+2*2+3*2 = 12
+    //   y[1,0] = 4*1 + 5*0 + 6*-1 = -2     y[1,1] = 4*2+5*2+6*2 = 30
+    const x = [_]f32{ 1, 2, 3, 4, 5, 6 };
+    const w = [_]f32{ 1, 0, -1, 2, 2, 2 };
+    var y: [4]f32 = undefined;
+    matmulBT(&x, &w, &y, 2, 3, 2);
+    const expected = [_]f32{ -2, 12, -2, 30 };
     for (expected, y) |e, a| try std.testing.expectApproxEqAbs(e, a, tol);
 }
 
