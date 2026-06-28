@@ -4,9 +4,6 @@ IMPORTANT: Keep your writings in this file concise and to the point to avoid con
 This is a simple fully-CPU implemented Zig inference engine for GPT2.
 The user is an LLM n00b who is using this to learn LLM inference on bare metal.
 
-@research/gpt2-inference-engine-guide.md contains a high level overview of what we're trying to accomplish.
-@research/implementation-plan.md contains a more concrete step-by-step implementation plan.
-
 ## Claude Response Style
 - Prefer a direct, concise communication style to save tokens and thinking time. 
 The user wants a low latency, low friction workflow -- skip unnecessary flattery,
