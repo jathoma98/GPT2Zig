@@ -1,5 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
+const platform = @import("../core/platform/platform.zig");
 
 const MAX_TENSORS = 200;
 const MAX_NAME = 64;
@@ -33,20 +34,18 @@ pub const TensorMeta = struct {
 pub const Handle = enum(u32) { _ };
 
 pub const SafeTensors = struct {
-    bytes: []align(std.heap.page_size_min) const u8,
+    map: platform.FileMap,
     tensors: [MAX_TENSORS]TensorMeta,
     count: u32,
     data_base: u64,
 
     pub fn init(io: std.Io, path: []const u8) !SafeTensors {
-        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-        defer file.close(io);
-        const size = (try file.stat(io)).size;
-        assert(size > 8);
-        const raw = try std.posix.mmap(null, size, .{ .READ = true }, .{ .TYPE = .PRIVATE }, file.handle, 0);
-        const hdr = try parseHeader(raw);
+        var map = try platform.FileMap.open(io, path);
+        errdefer map.close();
+        assert(map.bytes.len > 8);
+        const hdr = try parseHeader(map.bytes);
         return .{
-            .bytes = raw,
+            .map = map,
             .data_base = hdr.data_base,
             .count = hdr.count,
             .tensors = hdr.tensors,
@@ -54,7 +53,7 @@ pub const SafeTensors = struct {
     }
 
     pub fn deinit(self: *SafeTensors) void {
-        std.posix.munmap(self.bytes);
+        self.map.close();
     }
 
     pub fn find(self: *const SafeTensors, n: []const u8) ?Handle {
@@ -77,7 +76,7 @@ pub const SafeTensors = struct {
         const m = self.meta(h);
         const begin = self.data_base + m.data_begin;
         const end = self.data_base + m.data_end;
-        return self.bytes[begin..end];
+        return self.map.bytes[begin..end];
     }
 };
 
@@ -87,7 +86,7 @@ const ParsedHeader = struct {
     tensors: [MAX_TENSORS]TensorMeta,
 };
 
-fn parseHeader(bytes: []align(std.heap.page_size_min) const u8) !ParsedHeader {
+fn parseHeader(bytes: []const u8) !ParsedHeader {
     assert(bytes.len >= 8);
 
     const header_len = std.mem.readInt(u64, bytes[0..8], .little);

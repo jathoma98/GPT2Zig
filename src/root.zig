@@ -9,6 +9,7 @@ pub const op = @import("core/op.zig");
 pub const model = @import("core/model.zig");
 pub const token = @import("core/token.zig");
 pub const asset = @import("core/asset/asset.zig");
+pub const platform = @import("core/platform/platform.zig");
 
 pub const dist = struct {
     pub const runconfig = @import("dist/runconfig.zig");
@@ -27,6 +28,7 @@ test {
     _ = @import("core/testdata.zig");
     _ = @import("core/token.zig");
     _ = @import("core/asset/asset.zig");
+    _ = @import("core/platform/platform.zig");
     _ = @import("dist/partition.zig");
     _ = @import("dist/wire.zig");
     _ = @import("dist/runconfig.zig");

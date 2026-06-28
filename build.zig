@@ -1,12 +1,22 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 // ============================
 // === Python Venv Bootstrap ===
 
-const VENV_PYTHON = "python/.venv/bin/python";
+// venv layout is OS-dependent: POSIX puts the interpreter in bin/, Windows in Scripts/ with a .exe.
+const VENV_PYTHON = if (builtin.os.tag == .windows) "python/.venv/Scripts/python.exe" else "python/.venv/bin/python";
+// System interpreter name also differs: python.org/Store installers expose `python`/`py` on Windows
+// (and only sometimes `python3`), whereas POSIX canonically has `python3`. findProgram takes the
+// whole list and returns the first that resolves on PATH.
+const SYSTEM_PYTHON_NAMES: []const []const u8 = if (builtin.os.tag == .windows)
+    &.{ "python", "python3", "py" }
+else
+    &.{ "python3", "python" };
 const VENV_SENTINEL = "python/.venv/.deps_installed";
-// download_model.py materializes this symlink (into the venv-local HF cache). Its presence is what
-// distinguishes "deps ready" from "deps ready AND model present".
+// download_model.py materializes this link (symlink on POSIX, directory junction on Windows) into
+// the venv-local HF cache. Its presence is what distinguishes "deps ready" from "deps ready AND
+// model present".
 const MODEL_PATH = "models/gpt2/model.safetensors";
 
 // Each variant owns exactly the data its stage needs; illegal combinations
@@ -20,8 +30,8 @@ const PythonVenvState = union(enum) {
 };
 
 fn reducePythonState(b: *std.Build) PythonVenvState {
-    const sys_python = b.findProgram(&.{"python3"}, &.{}) catch
-        return .{ .failed = "python3 not found in PATH; install Python 3 to continue" };
+    const sys_python = b.findProgram(SYSTEM_PYTHON_NAMES, &.{}) catch
+        return .{ .failed = "Python 3 not found in PATH; install Python 3 to continue" };
 
     const io = b.graph.io;
     const cwd = std.Io.Dir.cwd();

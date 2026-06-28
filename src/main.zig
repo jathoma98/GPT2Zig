@@ -14,7 +14,11 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const arena = init.arena.allocator();
 
-    var args = init.minimal.args.iterate();
+    // iterateAllocator (not iterate) is the cross-platform form: Windows has no flat argv, so the
+    // command line is parsed into a heap buffer here (no-op deinit on POSIX). cfg_path points into
+    // that buffer, so the iterator must outlive its use below — hence deinit is deferred to end of main.
+    var args = try init.minimal.args.iterateAllocator(gpa);
+    defer args.deinit();
     _ = args.skip(); // argv[0]
     const cfg_path = args.next() orelse {
         std.log.err("usage: GPT2Zig <config.json>", .{});
