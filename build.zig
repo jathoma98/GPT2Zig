@@ -117,6 +117,30 @@ pub fn build(b: *std.Build) void {
     });
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
+    // ==========================================
+    // === Build-time tool: BPE table codegen ===
+    //
+    // A host-target Zig program transforms models/gpt2/merges.txt into a packed, mmap-ready binary
+    // (src/generated/bpe_tokenizer.bin) that token.zig consumes with zero runtime construction.
+    // Compiling this is fast; doing the same transform at comptime OOM-kills the compiler. The .bin
+    // is mmap'd (not embedded), so only `run`/`test` need it on disk — not the exe compile.
+    const bpe_tool = b.addExecutable(.{
+        .name = "gen_bpe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/gen_bpe.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    const gen_bpe_run = b.addRunArtifact(bpe_tool);
+    gen_bpe_run.addFileArg(b.path("models/gpt2/merges.txt")); // tracked input → cache-invalidates
+    const bpe_bin = gen_bpe_run.addOutputFileArg("bpe_tokenizer.bin");
+
+    const sync_bpe = b.addUpdateSourceFiles();
+    sync_bpe.addCopyFileToSource(bpe_bin, "src/generated/bpe_tokenizer.bin");
+    mod_tests.step.dependOn(&sync_bpe.step); // tests mmap the bin at runtime
+    run_cmd.step.dependOn(&sync_bpe.step); // so does the generation loop
+
     // =================================
     // === Codegen: tokenizer golden ===
 
@@ -127,6 +151,8 @@ pub fn build(b: *std.Build) void {
         venv_python,
         "python/gen_tokenizer_golden.py",
     });
+    // Track the script itself so editing the case list re-runs codegen (argv alone won't bust it).
+    gen_tok_cmd.addFileInput(b.path("python/gen_tokenizer_golden.py"));
     const tok_golden_zig = gen_tok_cmd.addOutputFileArg("tokenizer_golden.zig");
 
     // =====================================
@@ -173,6 +199,7 @@ pub fn build(b: *std.Build) void {
     gen_goldens_step.dependOn(&gen_kernel_cmd.step);
     gen_goldens_step.dependOn(&gen_ref_cmd.step);
     gen_goldens_step.dependOn(&gen_act_cmd.step);
+    gen_goldens_step.dependOn(&sync_bpe.step);
 
     // Copy the cached golden outputs to a fixed, gitignored source path. Tests @import them
     // by relative path ("generated/…") instead of as build-graph named modules, so the same

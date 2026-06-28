@@ -215,3 +215,10 @@ CHANGES:
 - `Child.Term` variants are lowercase: `.exited`, `.signal`, `.stopped`, `.unknown` (not `.Exited` etc.).
 - `io: std.Io` is not a field on `*std.Build` directly — it lives at `b.graph.io`.
 - `std.Build.findProgram(b, names, paths)` resolves an executable from PATH (and build search prefixes) without spawning a subprocess. Prefer it over `which`.
+- `std.mem.trimRight/trimLeft/trim` are now `trimEnd`/`trimStart`/`trim` (same `(comptime T, slice, values)` signature).
+- CLI args live on `std.process.Init` at `init.minimal.args` (a `std.process.Args`). Iterate: `var it = init.minimal.args.iterate(); _ = it.skip(); while (it.next()) |a| {...}` (`a` is `[:0]const u8`). `init.gpa` is a GP allocator; `init.arena` is an `*ArenaAllocator` for process-lifetime allocs.
+- A build `Run` step is cache-keyed on its argv; a script passed as a plain arg string is NOT tracked. Call `run.addFileInput(b.path("script.py"))` so editing the script busts the cache and re-runs codegen.
+- `b.graph.host` is the host `ResolvedTarget` — use it as `.target` for build-time tool executables (codegen helpers that must run on the build machine).
+- `Dir.readFileAlloc(io, path, gpa, limit)` reads a whole file (`limit` is a `std.Io.Limit`, e.g. `.unlimited`); `Dir.writeFile(io, .{ .sub_path, .data })` writes one in a single call.
+- `StaticStringMap(V).initComptime(kvs)` OOM-kills the compiler for large N (~50k) — it comptime-sorts all keys. For big tables, transform at build time (a host Zig tool) into a packed binary and mmap it, rather than building the map at comptime.
+- `std.ArrayList(T)` is unmanaged by default now: init with `.empty` (default-init is deprecated), and the allocator is passed per call — `list.append(gpa, x)`, `list.appendSlice(gpa, s)`, `list.deinit(gpa)`. The old managed `init(allocator)` form is gone.
