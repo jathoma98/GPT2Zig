@@ -25,7 +25,7 @@ const CONN_BUF = 64 * 1024;
 const CONNECT_ATTEMPTS = 40;
 const CONNECT_RETRY_MS = 250;
 
-pub fn run(io: std.Io, model_path: []const u8) !void {
+pub fn run(io: std.Io, model_path: []const u8, master_addr: []const u8) !void {
     // === load the full model (we run only our shard, but loading all layers is simplest) ===
     log.info("slave: loading model from {s}", .{model_path});
     var st = try SafeTensors.init(io, model_path);
@@ -37,7 +37,8 @@ pub fn run(io: std.Io, model_path: []const u8) !void {
     log.info("slave: model loaded (n_layer={d}, n_embd={d})", .{ cfg.n_layer, n_embd });
 
     // === bring-up: connect (with retry) → directive handshake → ready ===
-    const addr = try net.IpAddress.parse("127.0.0.1", wire.PORT);
+    const addr = try net.IpAddress.parse(master_addr, wire.PORT);
+    log.info("slave: will connect to {s}:{d}", .{ master_addr, wire.PORT });
     var rbuf: [CONN_BUF]u8 = undefined;
     var reader: net.Stream.Reader = undefined; // initialized by the bring-up FSM
     const range = try bringUpSlave(io, addr, &reader, &rbuf);

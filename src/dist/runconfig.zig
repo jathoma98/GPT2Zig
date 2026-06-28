@@ -12,16 +12,18 @@ pub const RunConfig = union(enum) {
     },
     slave: struct {
         model_path: []const u8,
+        master_addr: []const u8, // IP or hostname to dial; defaults to "127.0.0.1" if omitted in JSON
     },
 };
 
-// JSON: { "model_path": "...", "serverParams": { "type": "master"|"slave", "prompt"?, "expectedSlaves"? } }
+// JSON: { "model_path": "...", "serverParams": { "type": "master"|"slave", "prompt"?, "expectedSlaves"?, "masterAddr"? } }
 const Raw = struct {
     model_path: []const u8,
     serverParams: struct {
         type: []const u8,
         prompt: ?[]const u8 = null,
         expectedSlaves: ?u32 = null,
+        masterAddr: ?[]const u8 = null,
     },
 };
 
@@ -38,7 +40,10 @@ pub fn fromBytes(arena: std.mem.Allocator, bytes: []const u8) !RunConfig {
         } };
     }
     if (std.mem.eql(u8, sp.type, "slave")) {
-        return .{ .slave = .{ .model_path = raw.model_path } };
+        return .{ .slave = .{
+            .model_path = raw.model_path,
+            .master_addr = sp.masterAddr orelse "127.0.0.1",
+        } };
     }
     return error.InvalidServerType;
 }
@@ -60,7 +65,7 @@ test "parse master config" {
     try std.testing.expectEqual(@as(u32, 1), cfg.master.expected_slaves);
 }
 
-test "parse slave config" {
+test "parse slave config defaults to localhost" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const json =
@@ -69,6 +74,18 @@ test "parse slave config" {
     const cfg = try fromBytes(arena.allocator(), json);
     try std.testing.expect(cfg == .slave);
     try std.testing.expectEqualStrings("m.safetensors", cfg.slave.model_path);
+    try std.testing.expectEqualStrings("127.0.0.1", cfg.slave.master_addr);
+}
+
+test "parse slave config with custom masterAddr" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const json =
+        \\{ "model_path": "m.safetensors", "serverParams": { "type": "slave", "masterAddr": "192.168.1.42" } }
+    ;
+    const cfg = try fromBytes(arena.allocator(), json);
+    try std.testing.expect(cfg == .slave);
+    try std.testing.expectEqualStrings("192.168.1.42", cfg.slave.master_addr);
 }
 
 test "master missing fields is an error" {

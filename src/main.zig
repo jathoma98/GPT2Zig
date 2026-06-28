@@ -26,6 +26,6 @@ pub fn main(init: std.process.Init) !void {
 
     switch (cfg) {
         .master => |m| try dist.master.run(io, gpa, m.model_path, m.prompt, m.expected_slaves),
-        .slave => |s| try dist.slave.run(io, s.model_path),
+        .slave => |s| try dist.slave.run(io, s.model_path, s.master_addr),
     }
 }
