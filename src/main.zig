@@ -1,81 +1,31 @@
 const std = @import("std");
-const Io = std.Io;
-const assert = std.debug.assert;
-
 const GPT2Zig = @import("GPT2Zig");
-const Model = GPT2Zig.model.Model;
-const Config = GPT2Zig.config.Config;
-const SafeTensors = GPT2Zig.safetensors.SafeTensors;
-const Tokenizer = GPT2Zig.token.Tokenizer;
-const asset = GPT2Zig.asset;
+const dist = GPT2Zig.dist;
 
-const DEFAULT_PROMPT = "Hello, I am";
-// Cap generated tokens. Kept modest because there's no KV cache yet (M6): each step recomputes the
-// whole sequence with naive matmul, so wall-clock grows fast. Also bounded by n_ctx below.
-const MAX_NEW = 40;
+// Surface all log levels (incl. .debug) on stderr — the distributed path logs per-frame wire
+// traffic under the `.net` scope at debug, and full passes run in ReleaseSafe (where debug is
+// otherwise dropped). Generated text goes to stdout, so logs never corrupt the output.
+pub const std_options: std.Options = .{ .log_level = .debug };
 
+// The binary's sole CLI arg is a path to a run-config JSON (see src/dist/runconfig.zig). The parsed
+// role decides whether this process is the master (hub + HEAD/TAIL) or a slave (one BODY shard).
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
+    const arena = init.arena.allocator();
 
-    var stdout_buffer: [4096]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
-    const out = &stdout_file_writer.interface;
-
-    // === prompt: argv[1..] joined with single spaces, one token sequence ===
-    var prompt_buf = std.ArrayList(u8).empty;
-    defer prompt_buf.deinit(gpa);
     var args = init.minimal.args.iterate();
     _ = args.skip(); // argv[0]
-    while (args.next()) |a| {
-        if (prompt_buf.items.len != 0) try prompt_buf.append(gpa, ' ');
-        try prompt_buf.appendSlice(gpa, a);
+    const cfg_path = args.next() orelse {
+        std.log.err("usage: GPT2Zig <config.json>", .{});
+        return error.MissingConfigPath;
+    };
+
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, cfg_path, arena, .unlimited);
+    const cfg = try dist.runconfig.fromBytes(arena, bytes);
+
+    switch (cfg) {
+        .master => |m| try dist.master.run(io, gpa, m.model_path, m.prompt, m.expected_slaves),
+        .slave => |s| try dist.slave.run(io, s.model_path),
     }
-    const prompt: []const u8 = if (prompt_buf.items.len == 0) DEFAULT_PROMPT else prompt_buf.items;
-
-    // === load model + tokenizer ===
-    var st = try SafeTensors.init(io, asset.model_safetensors_path);
-    const cfg = try Config.fromBytes(asset.config_json);
-    var model = try Model.init(&st, cfg);
-    st.deinit(); // weights copied; mmap no longer referenced
-    defer model.deinit();
-
-    var tok = try Tokenizer.fromBytes(asset.bpe);
-    defer tok.deinit();
-
-    const n_ctx: usize = cfg.n_ctx;
-    const vocab: usize = cfg.vocab_size;
-
-    const ids = try gpa.alloc(u32, n_ctx);
-    defer gpa.free(ids);
-    var len = tok.encode(prompt, ids);
-    assert(len > 0 and len <= n_ctx);
-
-    // One logits buffer at the upper bound; each step uses the live [len*vocab] prefix.
-    const logits = try std.heap.page_allocator.alloc(f32, n_ctx * vocab);
-    defer std.heap.page_allocator.free(logits);
-
-    try out.writeAll(prompt);
-    try out.flush();
-
-    // === greedy generation loop (no KV cache yet — recomputes the whole sequence each step) ===
-    var produced: usize = 0;
-    while (produced < MAX_NEW and len < n_ctx) : (produced += 1) {
-        model.forward(ids[0..len], logits[0 .. len * vocab], .{});
-
-        const last = logits[(len - 1) * vocab ..][0..vocab];
-        var next: usize = 0;
-        for (last, 0..) |v, i| {
-            if (v > last[next]) next = i;
-        }
-        if (next == cfg.eos_token_id) break;
-
-        ids[len] = @intCast(next);
-        len += 1;
-        try out.writeAll(tok.decodeToken(@intCast(next)));
-        try out.flush();
-    }
-
-    try out.writeByte('\n');
-    try out.flush();
 }

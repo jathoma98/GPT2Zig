@@ -171,23 +171,30 @@ pub const Model = struct {
         // Weights are intentionally leaked: program-lifetime params, page-allocated.
     }
 
-    // ids:[S] → logits_out:[S, vocab]. taps capture intermediates for bisection (pass .{} in prod).
-    pub fn forward(self: *Model, ids: []const u32, logits_out: []f32, taps: Taps) void {
+    // =================
+    // === Forward-pass stages ===
+    //
+    // forward() is the single-process composition: embed → all layers → tail. The same three pieces
+    // are the cut points for model parallelism (src/dist): a process runs embed (HEAD), some
+    // contiguous runLayers range (BODY shard), and/or tail (TAIL). All operate in place on self.s.x,
+    // so the residual stream is the only state that crosses a machine boundary.
+
+    // The residual-stream scratch buffer at the n_ctx upper bound. The distributed BODY shard (a
+    // slave, or the master routing a slave's reply) receives a wire frame straight into this, then
+    // runLayers over the [0..S*n_embd] prefix — no extra allocation beyond model scratch.
+    pub fn residual(self: *Model) []f32 {
+        return self.s.x;
+    }
+
+    // ids:[S] → embedded residual stream. Writes self.s.x and returns the live [S, n_embd] slice.
+    pub fn embed(self: *Model, ids: []const u32, taps: Taps) []f32 {
         const cfg = self.cfg;
         const n_embd: usize = cfg.n_embd;
-        const n_head: usize = cfg.n_head;
-        const head_dim: usize = n_embd / n_head;
-        const vocab: usize = cfg.vocab_size;
         const S = ids.len;
-
         assert(S > 0 and S <= cfg.n_ctx);
         for (ids) |id| assert(id < cfg.vocab_size);
-        assert(logits_out.len == S * vocab);
 
         const x = self.s.x[0 .. S * n_embd];
-
-        // =================
-        // === Embedding ===
         // x[s] = wte[ids[s]] + wpe[s]
         for (0..S) |si| {
             const wte_row = self.w.wte[ids[si] * n_embd ..][0..n_embd];
@@ -196,86 +203,110 @@ pub const Model = struct {
             for (0..n_embd) |d| dst[d] = wte_row[d] + wpe_row[d];
         }
         tap(taps.embed, x);
+        return x;
+    }
 
-        // =================
-        // === Transformer layers ===
+    // Run one transformer layer in place on x:[S, n_embd], using self.s scratch. taps fire only for
+    // layer 0 / layer 5 (the bisection test); production and the distributed path pass .{}.
+    pub fn applyLayer(self: *Model, x: []f32, S: usize, layer_idx: usize, taps: Taps) void {
+        const cfg = self.cfg;
+        const n_embd: usize = cfg.n_embd;
+        const n_head: usize = cfg.n_head;
+        const head_dim: usize = n_embd / n_head;
         const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
         const qkv_stride = 3 * n_embd;
+        const L = self.w.layers[layer_idx];
 
-        for (0..cfg.n_layer) |layer| {
-            const L = self.w.layers[layer];
+        // --- attention block ---
+        const ln = self.s.ln[0 .. S * n_embd];
+        layernormRows(x, L.ln_1_w, L.ln_1_b, cfg.ln_eps, ln, S, n_embd);
+        if (layer_idx == 0) tap(taps.l0_ln1, ln);
 
-            // --- attention block ---
-            const ln = self.s.ln[0 .. S * n_embd];
-            layernormRows(x, L.ln_1_w, L.ln_1_b, cfg.ln_eps, ln, S, n_embd);
-            if (layer == 0) tap(taps.l0_ln1, ln);
+        const qkv = self.s.qkv[0 .. S * qkv_stride];
+        op.matmul(ln, L.attn_w, L.attn_b, qkv, S, n_embd, qkv_stride);
 
-            const qkv = self.s.qkv[0 .. S * qkv_stride];
-            op.matmul(ln, L.attn_w, L.attn_b, qkv, S, n_embd, qkv_stride);
+        const attn = self.s.attn[0 .. S * n_embd];
+        for (0..n_head) |h| {
+            const q_off = h * head_dim; // Q block starts at col 0
+            const k_off = n_embd + h * head_dim; // K block at col n_embd
+            const v_off = 2 * n_embd + h * head_dim; // V block at col 2*n_embd
+            for (0..S) |i| {
+                // scores[j] = (q_i · k_j) * scale, causal: only j <= i.
+                const q = qkv[i * qkv_stride + q_off ..][0..head_dim];
+                const scores = self.s.scores[0 .. i + 1];
+                for (0..i + 1) |j| {
+                    const k = qkv[j * qkv_stride + k_off ..][0..head_dim];
+                    var dot: f32 = 0;
+                    for (0..head_dim) |d| dot += q[d] * k[d];
+                    scores[j] = dot * scale;
+                }
+                op.softmax(scores, scores);
 
-            const attn = self.s.attn[0 .. S * n_embd];
-            for (0..n_head) |h| {
-                const q_off = h * head_dim; // Q block starts at col 0
-                const k_off = n_embd + h * head_dim; // K block at col n_embd
-                const v_off = 2 * n_embd + h * head_dim; // V block at col 2*n_embd
-                for (0..S) |i| {
-                    // scores[j] = (q_i · k_j) * scale, causal: only j <= i.
-                    const q = qkv[i * qkv_stride + q_off ..][0..head_dim];
-                    const scores = self.s.scores[0 .. i + 1];
-                    for (0..i + 1) |j| {
-                        const k = qkv[j * qkv_stride + k_off ..][0..head_dim];
-                        var dot: f32 = 0;
-                        for (0..head_dim) |d| dot += q[d] * k[d];
-                        scores[j] = dot * scale;
-                    }
-                    op.softmax(scores, scores);
-
-                    // out_i = Σ_{j<=i} p[j] · v_j, written into attn[i, h*head_dim:]
-                    const out = attn[i * n_embd + h * head_dim ..][0..head_dim];
-                    @memset(out, 0);
-                    for (0..i + 1) |j| {
-                        const v = qkv[j * qkv_stride + v_off ..][0..head_dim];
-                        const p = scores[j];
-                        for (0..head_dim) |d| out[d] += p * v[d];
-                    }
+                // out_i = Σ_{j<=i} p[j] · v_j, written into attn[i, h*head_dim:]
+                const out = attn[i * n_embd + h * head_dim ..][0..head_dim];
+                @memset(out, 0);
+                for (0..i + 1) |j| {
+                    const v = qkv[j * qkv_stride + v_off ..][0..head_dim];
+                    const p = scores[j];
+                    for (0..head_dim) |d| out[d] += p * v[d];
                 }
             }
-
-            const proj = self.s.proj[0 .. S * n_embd];
-            op.matmul(attn, L.attn_proj_w, L.attn_proj_b, proj, S, n_embd, n_embd);
-            if (layer == 0) tap(taps.l0_attn, proj);
-
-            for (0..S * n_embd) |idx| x[idx] += proj[idx];
-            if (layer == 0) tap(taps.l0_resid1, x);
-
-            // --- mlp block ---
-            const hdim = 4 * n_embd;
-            const ln2 = self.s.ln[0 .. S * n_embd];
-            layernormRows(x, L.ln_2_w, L.ln_2_b, cfg.ln_eps, ln2, S, n_embd);
-
-            const hidden = self.s.hidden[0 .. S * hdim];
-            op.matmul(ln2, L.fc_w, L.fc_b, hidden, S, n_embd, hdim);
-            op.gelu(hidden, hidden);
-
-            const mlp = self.s.mlp[0 .. S * n_embd];
-            op.matmul(hidden, L.mlp_proj_w, L.mlp_proj_b, mlp, S, hdim, n_embd);
-            if (layer == 0) tap(taps.l0_mlp, mlp);
-
-            for (0..S * n_embd) |idx| x[idx] += mlp[idx];
-            if (layer == 0) tap(taps.l0_out, x);
-            if (layer == 5) tap(taps.l5_out, x);
-
-            assertFinite(x);
         }
 
-        // =================
-        // === Final norm + tied logits ===
+        const proj = self.s.proj[0 .. S * n_embd];
+        op.matmul(attn, L.attn_proj_w, L.attn_proj_b, proj, S, n_embd, n_embd);
+        if (layer_idx == 0) tap(taps.l0_attn, proj);
+
+        for (0..S * n_embd) |idx| x[idx] += proj[idx];
+        if (layer_idx == 0) tap(taps.l0_resid1, x);
+
+        // --- mlp block ---
+        const hdim = 4 * n_embd;
+        const ln2 = self.s.ln[0 .. S * n_embd];
+        layernormRows(x, L.ln_2_w, L.ln_2_b, cfg.ln_eps, ln2, S, n_embd);
+
+        const hidden = self.s.hidden[0 .. S * hdim];
+        op.matmul(ln2, L.fc_w, L.fc_b, hidden, S, n_embd, hdim);
+        op.gelu(hidden, hidden);
+
+        const mlp = self.s.mlp[0 .. S * n_embd];
+        op.matmul(hidden, L.mlp_proj_w, L.mlp_proj_b, mlp, S, hdim, n_embd);
+        if (layer_idx == 0) tap(taps.l0_mlp, mlp);
+
+        for (0..S * n_embd) |idx| x[idx] += mlp[idx];
+        if (layer_idx == 0) tap(taps.l0_out, x);
+        if (layer_idx == 5) tap(taps.l5_out, x);
+
+        assertFinite(x);
+    }
+
+    // Run layers [lo, hi) in place on x:[S, n_embd] — the contiguous BODY shard a process owns.
+    pub fn runLayers(self: *Model, x: []f32, S: usize, lo: usize, hi: usize) void {
+        assert(lo <= hi and hi <= self.cfg.n_layer);
+        for (lo..hi) |layer| self.applyLayer(x, S, layer, .{});
+    }
+
+    // x:[S, n_embd] → logits_out:[S, vocab]. Final layernorm + tied output projection (no bias).
+    pub fn tail(self: *Model, x: []f32, S: usize, logits_out: []f32, taps: Taps) void {
+        const cfg = self.cfg;
+        const n_embd: usize = cfg.n_embd;
+        const vocab: usize = cfg.vocab_size;
+        assert(logits_out.len == S * vocab);
+
         const lnf = self.s.ln[0 .. S * n_embd];
         layernormRows(x, self.w.ln_f_w, self.w.ln_f_b, cfg.ln_eps, lnf, S, n_embd);
         tap(taps.lnf, lnf);
 
-        // logits = lnf @ wteᵀ — tied output embedding, no bias.
+        // logits = lnf @ wteᵀ — tied output embedding.
         op.matmulBT(lnf, self.w.wte, logits_out, S, n_embd, vocab);
+    }
+
+    // ids:[S] → logits_out:[S, vocab]. taps capture intermediates for bisection (pass .{} in prod).
+    pub fn forward(self: *Model, ids: []const u32, logits_out: []f32, taps: Taps) void {
+        const S = ids.len;
+        const x = self.embed(ids, taps);
+        for (0..self.cfg.n_layer) |layer| self.applyLayer(x, S, layer, taps);
+        self.tail(x, S, logits_out, taps);
     }
 };
 

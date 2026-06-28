@@ -1,0 +1,8 @@
+{
+  "model_path": "models/gpt2/model.safetensors",
+  "serverParams": {
+    "type": "master",
+    "prompt": "Hello, I am",
+    "expectedSlaves": 2
+  }
+}

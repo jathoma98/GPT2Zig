@@ -10,6 +10,14 @@ pub const model = @import("core/model.zig");
 pub const token = @import("core/token.zig");
 pub const asset = @import("core/asset/asset.zig");
 
+pub const dist = struct {
+    pub const runconfig = @import("dist/runconfig.zig");
+    pub const master = @import("dist/master.zig");
+    pub const slave = @import("dist/slave.zig");
+    pub const wire = @import("dist/wire.zig");
+    pub const partition = @import("dist/partition.zig");
+};
+
 test {
     _ = @import("safetensors/safetensors.zig");
     _ = @import("core/tensor.zig");
@@ -19,6 +27,11 @@ test {
     _ = @import("core/testdata.zig");
     _ = @import("core/token.zig");
     _ = @import("core/asset/asset.zig");
+    _ = @import("dist/partition.zig");
+    _ = @import("dist/wire.zig");
+    _ = @import("dist/runconfig.zig");
+    _ = @import("dist/master.zig");
+    _ = @import("dist/slave.zig");
 }
 
 pub fn printAnotherMessage(writer: *Io.Writer) Io.Writer.Error!void {
