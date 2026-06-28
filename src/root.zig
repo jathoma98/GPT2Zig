@@ -5,11 +5,13 @@ const Io = std.Io;
 pub const safetensors = @import("safetensors/safetensors.zig");
 pub const tensor = @import("core/tensor.zig");
 pub const config = @import("core/config.zig");
+pub const op = @import("core/op.zig");
 
 test {
     _ = @import("safetensors/safetensors.zig");
     _ = @import("core/tensor.zig");
     _ = @import("core/config.zig");
+    _ = @import("core/op.zig");
 }
 
 pub fn printAnotherMessage(writer: *Io.Writer) Io.Writer.Error!void {

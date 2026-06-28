@@ -142,6 +142,17 @@ pub fn build(b: *std.Build) void {
     gen_st_cmd.addFileArg(b.path("models/gpt2/config.json"));
     const st_golden_zig = gen_st_cmd.addOutputFileArg("safetensors_golden.zig");
 
+    // =================================
+    // === Codegen: kernel golden ===
+
+    // Fixed-seed numpy reference outputs for the M2 math kernels. No tracked file inputs —
+    // inputs are RNG-seeded in the script, so the output is purely a function of the script.
+    const gen_kernel_cmd = b.addSystemCommand(&.{
+        venv_python,
+        "python/gen_kernel_goldens.py",
+    });
+    const kernel_golden_zig = gen_kernel_cmd.addOutputFileArg("kernel_golden.zig");
+
     // Slow oracle refresh — also generates ref_logits.npy. Run manually when needed:
     //   zig build gen-goldens
     const gen_ref_cmd = b.addSystemCommand(&.{
@@ -151,6 +162,7 @@ pub fn build(b: *std.Build) void {
     const gen_goldens_step = b.step("gen-goldens", "Regenerate all Python oracle files");
     gen_goldens_step.dependOn(&gen_tok_cmd.step);
     gen_goldens_step.dependOn(&gen_st_cmd.step);
+    gen_goldens_step.dependOn(&gen_kernel_cmd.step);
     gen_goldens_step.dependOn(&gen_ref_cmd.step);
 
     // Copy the cached golden outputs to a fixed, gitignored source path. Tests @import them
@@ -159,6 +171,7 @@ pub fn build(b: *std.Build) void {
     const sync_goldens = b.addUpdateSourceFiles();
     sync_goldens.addCopyFileToSource(tok_golden_zig, "src/generated/tokenizer_golden.zig");
     sync_goldens.addCopyFileToSource(st_golden_zig, "src/generated/safetensors_golden.zig");
+    sync_goldens.addCopyFileToSource(kernel_golden_zig, "src/generated/kernel_golden.zig");
 
     // Only the test build references the goldens (all @imports are inside test blocks), so
     // only the test compile needs them on disk first; the exe build does not.
