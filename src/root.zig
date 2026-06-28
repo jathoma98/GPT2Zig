@@ -3,9 +3,13 @@ const std = @import("std");
 const Io = std.Io;
 
 pub const safetensors = @import("safetensors/safetensors.zig");
+pub const tensor = @import("core/tensor.zig");
+pub const config = @import("core/config.zig");
 
 test {
     _ = @import("safetensors/safetensors.zig");
+    _ = @import("core/tensor.zig");
+    _ = @import("core/config.zig");
 }
 
 pub fn printAnotherMessage(writer: *Io.Writer) Io.Writer.Error!void {
@@ -13,7 +17,7 @@ pub fn printAnotherMessage(writer: *Io.Writer) Io.Writer.Error!void {
 }
 
 test "tokenizer golden cases" {
-    const g = @import("tokenizer_golden");
+    const g = @import("generated/tokenizer_golden.zig");
     try std.testing.expectEqual(@as(usize, 12), g.cases.len);
     try std.testing.expectEqualStrings("hello world", g.cases[0].in);
     // "<|endoftext|>" must encode atomically to the single EOS token 50256

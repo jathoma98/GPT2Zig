@@ -105,21 +105,29 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    const mod_tests = b.addTest(.{ .root_module = mod });
+    // -Dtest-filter lets the VSCode debug launcher build a binary containing only the
+    // test being debugged (filter is baked in at compile time). Empty → all tests.
+    const test_filter = b.option([]const u8, "test-filter", "Only build/run tests matching this substring");
+    const test_filters: []const []const u8 = if (test_filter) |f| &.{f} else &.{};
+
+    const mod_tests = b.addTest(.{
+        .name = "unit-tests",
+        .root_module = mod,
+        .filters = test_filters,
+    });
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
     // =================================
     // === Codegen: tokenizer golden ===
 
     // Runs gen_tokenizer_golden.py and writes tokenizer_golden.zig into the build cache.
-    // Fast (~1s); runs on every `zig build test`. Zig threads the LazyPath through the
-    // module system so tests can @import("tokenizer_golden") without runtime file I/O.
+    // Fast (~1s), cached on its inputs. The cache LazyPath is copied into src/generated/
+    // below so a bare `zig test <file>` (IDE inline debugger) can @import it by path.
     const gen_tok_cmd = b.addSystemCommand(&.{
         venv_python,
         "python/gen_tokenizer_golden.py",
     });
     const tok_golden_zig = gen_tok_cmd.addOutputFileArg("tokenizer_golden.zig");
-    mod.addImport("tokenizer_golden", b.createModule(.{ .root_source_file = tok_golden_zig }));
 
     // =====================================
     // === Codegen: safetensors golden ===
@@ -129,10 +137,10 @@ pub fn build(b: *std.Build) void {
         venv_python,
         "python/gen_safetensors_golden.py",
     });
-    // Register the model file as a tracked input: build cache invalidates if it changes.
+    // Register the model + config files as tracked inputs: build cache invalidates if they change.
     gen_st_cmd.addFileArg(b.path("models/gpt2/model.safetensors"));
+    gen_st_cmd.addFileArg(b.path("models/gpt2/config.json"));
     const st_golden_zig = gen_st_cmd.addOutputFileArg("safetensors_golden.zig");
-    mod.addImport("safetensors_golden", b.createModule(.{ .root_source_file = st_golden_zig }));
 
     // Slow oracle refresh — also generates ref_logits.npy. Run manually when needed:
     //   zig build gen-goldens
@@ -145,8 +153,26 @@ pub fn build(b: *std.Build) void {
     gen_goldens_step.dependOn(&gen_st_cmd.step);
     gen_goldens_step.dependOn(&gen_ref_cmd.step);
 
+    // Copy the cached golden outputs to a fixed, gitignored source path. Tests @import them
+    // by relative path ("generated/…") instead of as build-graph named modules, so the same
+    // imports resolve under both `zig build test` and a standalone `zig test <file>`.
+    const sync_goldens = b.addUpdateSourceFiles();
+    sync_goldens.addCopyFileToSource(tok_golden_zig, "src/generated/tokenizer_golden.zig");
+    sync_goldens.addCopyFileToSource(st_golden_zig, "src/generated/safetensors_golden.zig");
+
+    // Only the test build references the goldens (all @imports are inside test blocks), so
+    // only the test compile needs them on disk first; the exe build does not.
+    mod_tests.step.dependOn(&sync_goldens.step);
+
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
-    run_mod_tests.step.dependOn(&gen_tok_cmd.step);
-    run_mod_tests.step.dependOn(&gen_st_cmd.step);
+
+    // `zig build test-debug -Dtest-filter=<name>` builds (but does not run) the unit-test
+    // binary to a stable path for the VSCode debugger. Subdir test files (core/*.zig) can't
+    // be compiled by a bare `zig test <file>` because their `../` imports escape the
+    // standalone module root — the full module graph here resolves them.
+    const install_test = b.addInstallArtifact(mod_tests, .{ .dest_dir = .{ .override = .bin } });
+    install_test.step.dependOn(&sync_goldens.step);
+    const test_debug_step = b.step("test-debug", "Build the unit-test binary for debugging");
+    test_debug_step.dependOn(&install_test.step);
 }

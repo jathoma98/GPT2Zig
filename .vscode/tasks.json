@@ -1,0 +1,23 @@
+{
+  "version": "2.0.0",
+  "inputs": [
+    {
+      "id": "testFilter",
+      "type": "promptString",
+      "description": "Test name substring to debug (empty = all tests)",
+      "default": ""
+    }
+  ],
+  "tasks": [
+    {
+      // Builds (does not run) zig-out/bin/unit-tests with only the matching test(s)
+      // compiled in. The filter is baked at compile time via -Dtest-filter.
+      "label": "zig: build unit-test binary",
+      "type": "shell",
+      "command": "zig",
+      "args": ["build", "test-debug", "-Dtest-filter=${input:testFilter}"],
+      "group": "build",
+      "problemMatcher": []
+    }
+  ]
+}

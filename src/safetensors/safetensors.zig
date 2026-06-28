@@ -244,7 +244,7 @@ test "safetensors dump" {
 }
 
 test "safetensors manifest" {
-    const golden = @import("safetensors_golden");
+    const golden = @import("../generated/safetensors_golden.zig");
     var st = try SafeTensors.init(std.testing.io, "models/gpt2/model.safetensors");
     defer st.deinit();
 
@@ -265,7 +265,7 @@ test "safetensors manifest" {
 }
 
 test "safetensors spot-check" {
-    const golden = @import("safetensors_golden");
+    const golden = @import("../generated/safetensors_golden.zig");
     var st = try SafeTensors.init(std.testing.io, "models/gpt2/model.safetensors");
     defer st.deinit();
 

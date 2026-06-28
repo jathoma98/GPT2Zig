@@ -1,0 +1,19 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // Debugs any unit test — including subdir files (core/*.zig) that a bare
+      // `zig test <file>` can't compile. Prompts for a test-name substring, builds
+      // a filtered test binary through build.zig, then launches it under lldb.
+      // Requires the CodeLLDB extension (vadimcn.vscode-lldb).
+      "name": "Debug Zig test",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/zig-out/bin/unit-tests",
+      "args": [],
+      // Tests open models/gpt2/* relative to cwd — must be the repo root.
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "zig: build unit-test binary"
+    }
+  ]
+}
