@@ -392,7 +392,7 @@ test "forward bisection vs activation goldens" {
     });
 
     // Bisect in forward order: the first failing tap localizes the bug to one sub-op.
-    std.debug.print("\nM3 activation bisection:\n", .{});
+    // std.debug.print("\nM3 activation bisection:\n", .{});
     const act_tol: f32 = 1e-3;
     const logit_tol: f32 = 1e-2;
     try testdata.expectClose("embed", g_embed.data(), embed, act_tol);
@@ -408,6 +408,6 @@ test "forward bisection vs activation goldens" {
     // Tolerance-free signal: greedy next token must match HF's.
     const got = argmaxLastRow(logits, S, vocab);
     const want = argmaxLastRow(g_logits.data(), S, vocab);
-    std.debug.print("  argmax(last): got {d}, want {d}\n", .{ got, want });
+    // std.debug.print("  argmax(last): got {d}, want {d}\n", .{ got, want });
     try std.testing.expectEqual(want, got);
 }

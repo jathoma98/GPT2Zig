@@ -68,8 +68,9 @@ pub fn expectClose(label: []const u8, golden: []align(1) const f32, actual: []co
             max_idx = i;
         }
     }
-    std.debug.print("  {s}: max-abs-diff {e:.4} at [{d}] (golden {e:.6} vs actual {e:.6})\n", .{
-        label, max_diff, max_idx, golden[max_idx], actual[max_idx],
-    });
+    _ = label;
+    // std.debug.print("  {s}: max-abs-diff {e:.4} at [{d}] (golden {e:.6} vs actual {e:.6})\n", .{
+    //     label, max_diff, max_idx, golden[max_idx], actual[max_idx],
+    // });
     if (max_diff > tol) return error.GoldenMismatch;
 }
