@@ -4,6 +4,9 @@ IMPORTANT: Keep your writings in this file concise and to the point to avoid con
 This is a simple fully-CPU implemented Zig inference engine for GPT2.
 The user is an LLM n00b who is using this to learn LLM inference on bare metal.
 
+@research/gpt2-inference-engine-guide.md contains a high level overview of what we're trying to accomplish.
+@research/implementation-plan.md contains a more concrete step-by-step implementation plan.
+
 ## Claude Response Style
 - Prefer a direct, concise communication style to save tokens and thinking time. 
 The user wants a low latency, low friction workflow -- skip unnecessary flattery,
@@ -15,17 +18,42 @@ The user won't feel patronized: in fact, the user is here to learn about LLMs an
 delighted to learn something new from you.
 
 ## Zig Coding Style Guidelines
+
+- For 'code smell' guidelines, remember that 'code smell' does not equal 'banned' -- it means the code has
+typically unfavorable characteristics. You are welcome to use any 'code smell' so long as you provide a proper
+justification (appeal to simplicity, perf, etc.)
+
 - Prefer simplicity and explicitness. Introduce abstractions only when they have a justifiable complexity vs simplicity tradeoff.
 
-- Move errors to compile time whenever possible. When that isn't possible, consider asserting program invariants at runtime.
+- Move errors as close to their source as possible. Compile time is ideal.
+ When that isn't possible, assert program invariants at runtime (preconditions and postconditions), as close to the point
+ of invariant violation as possible. Runtime asserts should be performed especially
+ aggressively during init code where the perf price of such invariants is low relative to
+ whole program execution.
+
+ - `zig build test` should test everything. If a module with module-level tests isn't discoverable from the root module,
+ use the:
+ ```
+ test {
+    _ = @import("module);
+ }
+ ```
+ idiom to force discovery from the main module.
 
 - Prefer a functional, explicit style of programming. Tagged unions are excellent for encoding state machines
 and state private data: Zig enforces via `switch` that a state's private data can only be accessed when the
 variable is actually in that state.
 
-- Comments are a code smell. Comments should explain 'why', not 'what'. They should explain unintuitive tradeoffs,
-or surprising runtime behavior, etc. When in doubt, don't comment. Structural comments in large code blocks
-so that the large function can be grokked at a glance are the exception.
+- Prefer explicit initialization of struct members over `undefined` or zero-initting then setting members
+manually line-by-line. Constructing a struct with the `.{ member = value, }` syntax ensures we get compile errors
+when we add new members. Default values for members are okay so long as they are actually valid default values
+and not simply means of silencing the compiler to be overwritten at runtime later. The `.init(args)` idiom
+is ideal for structs with nontrivial initialization.
+
+- Explanatory comments are a code smell. Comments should explain 'why', not 'what'. They should explain unintuitive tradeoffs,
+or surprising runtime behavior, etc. 
+Exception: Structural comments in large code blocks so that the large function can be grokked at a glance. These are encouraged.
+`parseHeader` in `safetensors.zig` is a good example of structural commenting.
 
 - Helper functions are a code smell - good justifications are: multiple usage sites for a common codepath,
 testability (ex: a state transition function so that it can be tested). For organizing large code blocks, prefer
@@ -36,7 +64,8 @@ header-style comments like:
 ```
 
 - Heap allocations are a code smell - prefer to reason about a likely upper bound for memory needed and statically
-allocate within that upper bound.
+allocate within that upper bound. Of course, sometimes heap allocation is unavoidable -- just make sure you provide
+a proper justification if you reach for it.
 
 - Raw pointers are a code smell - prefer opaque enum handle types (const Handle = enum(u32) {_} ), which are array indices
 into some flat array of data structures. They are often more compact (not needing a full 64 bit address) and can optionally
@@ -78,15 +107,15 @@ Acceptable 'null' (or optional '?T' type) usage is as the return of a function w
 that the user is expected to switch on and handle, or for cases where the 'null' encodes semantics that are obvious
 at first glance (ex: 'null' in a json field means nonexistent).
 
+- Prefer functional style composition over object-oriented style member functions. Structs are containers for data,
+functions perform transformations on data. Keep functions pure if the perf and complexity characteristics are favorable.
+Good exceptions for member functions are container types like Lists where List.push() makes sense semantically as the list 'owning' its accounting
+data structures. Good exceptions for non-pure functions are top-level functions with large scopes, ex: a frame tick in a video game, where
+copying every tick's input and output data would have prohibitive perf characteristics.
+
+- Avoid magic numbers: encode constants as enums for readability and correctness.
+
 
 ## Python reference oracle
 
 All Python tooling lives under `python/` with a venv at `python/.venv`.
-
-```sh
-# Generate tiktoken golden table (exact integer token IDs for validation)
-python/.venv/bin/python python/gen_tokenizer_golden.py
-
-# Dump HF reference logits to python/ref_logits.npy (downloads model on first run)
-python/.venv/bin/python python/gen_ref_logits.py
-```

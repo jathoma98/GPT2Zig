@@ -2,3 +2,4 @@
 zig-out
 models/gpt2
 python/*.npy
+__pycache__

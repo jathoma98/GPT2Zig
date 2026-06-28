@@ -148,6 +148,19 @@ pub fn build(b: *std.Build) void {
     const tok_golden_zig = gen_tok_cmd.addOutputFileArg("tokenizer_golden.zig");
     mod.addImport("tokenizer_golden", b.createModule(.{ .root_source_file = tok_golden_zig }));
 
+    // =====================================
+    // === Codegen: safetensors golden ===
+
+    // Reads the model header + two spot-check tensors; fast (~1s) on every `zig build test`.
+    const gen_st_cmd = b.addSystemCommand(&.{
+        "python/.venv/bin/python",
+        "python/gen_safetensors_golden.py",
+    });
+    // Register the model file as a tracked input: build cache invalidates if it changes.
+    gen_st_cmd.addFileArg(b.path("models/gpt2/model.safetensors"));
+    const st_golden_zig = gen_st_cmd.addOutputFileArg("safetensors_golden.zig");
+    mod.addImport("safetensors_golden", b.createModule(.{ .root_source_file = st_golden_zig }));
+
     // Slow oracle refresh — also generates ref_logits.npy. Run manually when needed:
     //   zig build gen-goldens
     const gen_ref_cmd = b.addSystemCommand(&.{
@@ -156,6 +169,7 @@ pub fn build(b: *std.Build) void {
     });
     const gen_goldens_step = b.step("gen-goldens", "Regenerate all Python oracle files");
     gen_goldens_step.dependOn(&gen_tok_cmd.step);
+    gen_goldens_step.dependOn(&gen_st_cmd.step);
     gen_goldens_step.dependOn(&gen_ref_cmd.step);
 
     // A top level step for running all tests. dependOn can be called multiple
@@ -165,7 +179,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     run_mod_tests.step.dependOn(&gen_tok_cmd.step);
+    run_mod_tests.step.dependOn(&gen_st_cmd.step);
     run_exe_tests.step.dependOn(&gen_tok_cmd.step);
+    run_exe_tests.step.dependOn(&gen_st_cmd.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
