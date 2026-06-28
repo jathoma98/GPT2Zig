@@ -15,7 +15,6 @@ const PythonVenvState = union(enum) {
     failed: []const u8,
 };
 
-// One-shot probe: observes the world once and returns the entry state.
 fn reducePythonState(b: *std.Build) PythonVenvState {
     const sys_python = b.findProgram(&.{"python3"}, &.{}) catch
         return .{ .failed = "python3 not found in PATH; install Python 3 to continue" };
@@ -44,7 +43,6 @@ fn ensureVenvReady(b: *std.Build) []const u8 {
     }
 }
 
-// Creates the venv; lands in .install_deps.
 fn transitionToInstallDeps(io: std.Io, system_python: []const u8) PythonVenvState {
     std.log.info("python: creating venv at python/.venv", .{});
     runCommand(io, &.{ system_python, "-m", "venv", "python/.venv" }) catch
@@ -52,7 +50,6 @@ fn transitionToInstallDeps(io: std.Io, system_python: []const u8) PythonVenvStat
     return .install_deps;
 }
 
-// Installs deps and writes the sentinel; lands in .ready.
 fn transitionToReady(io: std.Io) PythonVenvState {
     std.log.info("python: installing deps from python/requirements.txt", .{});
     runCommand(io, &.{ VENV_PYTHON, "-m", "pip", "install", "-r", "python/requirements.txt" }) catch
@@ -63,7 +60,6 @@ fn transitionToReady(io: std.Io) PythonVenvState {
     return .ready;
 }
 
-// Spawns argv with inherited stdio; returns error.CommandFailed on non-zero exit.
 fn runCommand(io: std.Io, argv: []const []const u8) !void {
     var child = try std.process.spawn(io, .{ .argv = argv });
     const term = try child.wait(io);
@@ -112,9 +108,6 @@ pub fn build(b: *std.Build) void {
     const mod_tests = b.addTest(.{ .root_module = mod });
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
-    const exe_tests = b.addTest(.{ .root_module = exe.root_module });
-    const run_exe_tests = b.addRunArtifact(exe_tests);
-
     // =================================
     // === Codegen: tokenizer golden ===
 
@@ -154,9 +147,6 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
-    test_step.dependOn(&run_exe_tests.step);
     run_mod_tests.step.dependOn(&gen_tok_cmd.step);
     run_mod_tests.step.dependOn(&gen_st_cmd.step);
-    run_exe_tests.step.dependOn(&gen_tok_cmd.step);
-    run_exe_tests.step.dependOn(&gen_st_cmd.step);
 }

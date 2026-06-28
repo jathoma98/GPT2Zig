@@ -81,7 +81,6 @@ pub const SafeTensors = struct {
     }
 };
 
-// Returned by parseHeader; allows SafeTensors.init to construct via struct literal.
 const ParsedHeader = struct {
     data_base: u64,
     count: u32,
@@ -104,7 +103,6 @@ fn parseHeader(bytes: []align(std.heap.page_size_min) const u8) !ParsedHeader {
     var scanner = std.json.Scanner.initCompleteInput(std.heap.page_allocator, header_json);
     defer scanner.deinit();
 
-    // tensors is an array populated slot-by-slot; each slot is set via struct literal below.
     var tensors: [MAX_TENSORS]TensorMeta = undefined;
     var count: u32 = 0;
 
@@ -133,7 +131,6 @@ fn parseHeader(bytes: []align(std.heap.page_size_min) const u8) !ParsedHeader {
 
                 expectTag(try scanner.next(), .object_begin);
 
-                // Gather all fields before constructing TensorMeta.
                 var name_buf: [MAX_NAME]u8 = .{0} ** MAX_NAME;
                 @memcpy(name_buf[0..key.len], key);
                 var rank: u8 = 0;
@@ -203,7 +200,6 @@ fn parseHeader(bytes: []align(std.heap.page_size_min) const u8) !ParsedHeader {
                     .data_begin = data_begin,
                     .data_end = data_end,
                 };
-                // Validate byte count matches shape × sizeof(f32).
                 assert(tensors[count].byte_count() == data_end - data_begin);
                 count += 1;
             },
@@ -231,10 +227,7 @@ fn skipJsonValue(scanner: *std.json.Scanner) !void {
                 depth -= 1;
                 if (depth == 0) return;
             },
-            .string, .number, .true, .false, .null,
-            .partial_string, .allocated_string, .allocated_number, .partial_number,
-            .partial_string_escaped_1, .partial_string_escaped_2,
-            .partial_string_escaped_3, .partial_string_escaped_4 => {
+            .string, .number, .true, .false, .null, .partial_string, .allocated_string, .allocated_number, .partial_number, .partial_string_escaped_1, .partial_string_escaped_2, .partial_string_escaped_3, .partial_string_escaped_4 => {
                 if (depth == 0) return;
             },
             .end_of_document => return error.UnexpectedEof,
@@ -248,16 +241,6 @@ fn skipJsonValue(scanner: *std.json.Scanner) !void {
 test "safetensors dump" {
     var st = try SafeTensors.init(std.testing.io, "models/gpt2/model.safetensors");
     defer st.deinit();
-
-    std.debug.print("\n--- SafeTensors manifest ({d} tensors) ---\n", .{st.count});
-    for (st.tensors[0..st.count]) |*t| {
-        std.debug.print("  {s}: {s} rank={d} shape=[", .{ t.name(), @tagName(t.dtype), t.rank });
-        for (0..t.rank) |i| {
-            if (i > 0) std.debug.print(", ", .{});
-            std.debug.print("{d}", .{t.shape[i]});
-        }
-        std.debug.print("] bytes=[{d},{d})\n", .{ t.data_begin, t.data_end });
-    }
 }
 
 test "safetensors manifest" {

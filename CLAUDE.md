@@ -182,6 +182,22 @@ copying every tick's input and output data would have prohibitive perf character
 
 - Avoid magic numbers: encode constants as enums for readability and correctness.
 
+- Prefer to make switch statements exhaustive rather than using 'else'. We want to surface compile errors whenever
+we add enum members which are switched upon in the code. If multiple enum members should take some default codepath,
+prefer to enumerate them explicitly in sequence. Ex:
+```
+// BAD: Doesn't surface anything if we add '.e' which turns out to need handling here
+switch (thing) {
+    .a => // do something
+    else => {} // do nothing
+}
+
+// GOOD: Gives us a compile error when we add '.e'
+switch (thing) {
+    .a => // do something
+    .b, .c, .d => {} // do nothing
+}
+
 
 ## Python reference oracle
 
