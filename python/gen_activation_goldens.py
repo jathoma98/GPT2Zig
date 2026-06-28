@@ -9,6 +9,8 @@ import os
 import sys
 import struct
 
+import _hf_env  # noqa: F401  — redirect HF cache into the venv before transformers import
+
 import numpy as np
 import torch
 from transformers import GPT2LMHeadModel

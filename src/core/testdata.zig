@@ -1,7 +1,7 @@
-//! Reader for the mmap'd, self-describing golden files the M3 activation oracle dumps.
-//! Format (little-endian): [u32 ndim][u32 dim0]…[u32 dim_{ndim-1}][f32 data…]. The data section
-//! begins at byte 4*(1+ndim), always a multiple of 4, so f32 payload is naturally aligned within
-//! the page-aligned mmap. Mirrors the mmap pattern in safetensors.zig.
+//! Reader for the self-describing golden files the M3 activation oracle dumps (embedded via
+//! asset.zig). Format (little-endian): [u32 ndim][u32 dim0]…[u32 dim_{ndim-1}][f32 data…]. The
+//! data section begins at byte 4*(1+ndim); f32 payload is read with align(1) loads, so no
+//! alignment guarantee on the backing bytes is required.
 const std = @import("std");
 const assert = std.debug.assert;
 const tensor = @import("tensor.zig");
@@ -9,18 +9,14 @@ const tensor = @import("tensor.zig");
 const MAX_DIMS = 2;
 
 pub const Golden = struct {
-    bytes: []align(std.heap.page_size_min) const u8,
+    bytes: []align(1) const u8,
     ndim: u32,
     dims: [MAX_DIMS]u32,
     data_offset: u32,
 
-    pub fn init(io: std.Io, path: []const u8) !Golden {
-        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-        defer file.close(io);
-        const size = (try file.stat(io)).size;
-        assert(size >= 8); // at least ndim + one dim
-
-        const raw = try std.posix.mmap(null, size, .{ .READ = true }, .{ .TYPE = .PRIVATE }, file.handle, 0);
+    // Bytes are embedded (see asset.zig); parse the self-describing header straight from the slice.
+    pub fn fromBytes(raw: []align(1) const u8) Golden {
+        assert(raw.len >= 8); // at least ndim + one dim
 
         const ndim = std.mem.readInt(u32, raw[0..4], .little);
         assert(ndim >= 1 and ndim <= MAX_DIMS);
@@ -35,13 +31,13 @@ pub const Golden = struct {
 
         const data_offset: u32 = @intCast(4 * (1 + ndim));
         // Byte length must match the declared shape exactly — catches a python/zig shape mismatch.
-        assert(size == data_offset + count * 4);
+        assert(raw.len == data_offset + count * 4);
 
         return .{ .bytes = raw, .ndim = ndim, .dims = dims, .data_offset = data_offset };
     }
 
     pub fn deinit(self: *Golden) void {
-        std.posix.munmap(self.bytes);
+        _ = self; // embedded rodata — nothing to free (kept so callsites can `defer g.deinit()`)
     }
 
     pub fn data(self: *const Golden) []align(1) const f32 {

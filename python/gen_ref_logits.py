@@ -1,3 +1,4 @@
+import _hf_env  # noqa: F401  — redirect HF cache into the venv before transformers import
 from transformers import GPT2LMHeadModel
 import torch, numpy as np
 import os

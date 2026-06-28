@@ -14,6 +14,12 @@ If it sounds wrong to you (Claude), it probably is, and offer clarification to t
 The user won't feel patronized: in fact, the user is here to learn about LLMs and will be
 delighted to learn something new from you.
 
+
+## Running the main inference pass `zig build run`
+Zig tests are ok to run in the default (Debug) mode.
+Full inference passes should be run in -Doptimize=ReleaseSafe for speed while
+still keeping debug asserts on.
+
 ## Zig Coding Style Guidelines
 
 - For 'code smell' guidelines, remember that 'code smell' does not equal 'banned' -- it means the code has
@@ -222,3 +228,6 @@ CHANGES:
 - `Dir.readFileAlloc(io, path, gpa, limit)` reads a whole file (`limit` is a `std.Io.Limit`, e.g. `.unlimited`); `Dir.writeFile(io, .{ .sub_path, .data })` writes one in a single call.
 - `StaticStringMap(V).initComptime(kvs)` OOM-kills the compiler for large N (~50k) — it comptime-sorts all keys. For big tables, transform at build time (a host Zig tool) into a packed binary and mmap it, rather than building the map at comptime.
 - `std.ArrayList(T)` is unmanaged by default now: init with `.empty` (default-init is deprecated), and the allocator is passed per call — `list.append(gpa, x)`, `list.appendSlice(gpa, s)`, `list.deinit(gpa)`. The old managed `init(allocator)` form is gone.
+- `@embedFile` can't reference a path that escapes the module root dir (the dir of `root_source_file`, e.g. `src/`) via `..`, and can't see build-step outputs. To embed an arbitrary file or a LazyPath, wire it as a build-graph import: `mod.addAnonymousImport("name", .{ .root_source_file = lazypath })` then `@embedFile("name")`. Works for any file type, not just `.zig`. Embedding a Run step's `addOutputFileArg` LazyPath auto-creates the compile→tool dependency (no copy-to-source needed). Add the import to the module that *contains* the embedding file so both the exe (which imports it) and the test build (which IS that module) see it.
+- Build options: `const o = b.addOptions(); o.addOption(bool, "flag", val); mod.addOptions("build_options", o);` then `@import("build_options").flag` (comptime-known) in source. Use it to gate optional `@embedFile`s — a `comptime if (build_options.flag) @embedFile(...) else null` branch isn't compiled when false, so the import need not exist.
+- `@embedFile` returns alignment-1 bytes. To get an aligned blob (e.g. for a `u64` section): `const raw align(8) = @embedFile("name").*; const bytes: []align(8) const u8 = &raw;` — the `.*` forces an aligned rodata copy at comptime (fine for small files; don't do it for huge ones).

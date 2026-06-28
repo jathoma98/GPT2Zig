@@ -298,20 +298,10 @@ fn assertFinite(buf: []const f32) void {
 
 const testdata = @import("testdata.zig");
 const Golden = testdata.Golden;
-
-const MODEL = "models/gpt2/model.safetensors";
-const CONFIG = "models/gpt2/config.json";
-const GEN_DIR = "src/generated/";
+const asset = @import("asset/asset.zig");
 
 // Hardcoded prompt "Hello, I am" — the same ids gen_ref_logits.py / gen_activation_goldens.py use.
 const PROMPT = [_]u32{ 15496, 11, 314, 1101 };
-
-fn openGolden(io: std.Io, comptime base: []const u8) !?Golden {
-    return Golden.init(io, GEN_DIR ++ base) catch |e| switch (e) {
-        error.FileNotFound => null,
-        else => e,
-    };
-}
 
 fn argmaxLastRow(logits: []align(1) const f32, s: usize, vocab: usize) usize {
     const row = logits[(s - 1) * vocab ..][0..vocab];
@@ -326,8 +316,8 @@ test "forward bisection vs activation goldens" {
     const io = std.testing.io;
     const alloc = std.testing.allocator;
 
-    var st = try SafeTensors.init(io, MODEL);
-    const cfg = try Config.fromFile(io, CONFIG);
+    var st = try SafeTensors.init(io, asset.model_safetensors_path);
+    const cfg = try Config.fromBytes(asset.config_json);
     var model = try Model.init(&st, cfg);
     st.deinit(); // weights copied; mmap no longer referenced
     defer model.deinit();
@@ -336,28 +326,28 @@ test "forward bisection vs activation goldens" {
     const n_embd: usize = cfg.n_embd;
     const vocab: usize = cfg.vocab_size;
 
-    // Open the final-logits golden first; if it's absent, none have been generated → skip.
-    var g_logits = (try openGolden(io, "act_logits.bin")) orelse {
+    // Goldens are all-or-nothing; if absent (not generated), skip the whole bisection test.
+    const gld = asset.act_goldens orelse {
         std.debug.print("\nactivation goldens missing — run `zig build gen-goldens` to enable the M3 bisection test\n", .{});
         return error.SkipZigTest;
     };
+    var g_logits = Golden.fromBytes(gld.logits);
     defer g_logits.deinit();
-
-    var g_embed = (try openGolden(io, "act_embed.bin")).?;
+    var g_embed = Golden.fromBytes(gld.embed);
     defer g_embed.deinit();
-    var g_l0_ln1 = (try openGolden(io, "act_l0_ln1.bin")).?;
+    var g_l0_ln1 = Golden.fromBytes(gld.l0_ln1);
     defer g_l0_ln1.deinit();
-    var g_l0_attn = (try openGolden(io, "act_l0_attn.bin")).?;
+    var g_l0_attn = Golden.fromBytes(gld.l0_attn);
     defer g_l0_attn.deinit();
-    var g_l0_resid1 = (try openGolden(io, "act_l0_resid1.bin")).?;
+    var g_l0_resid1 = Golden.fromBytes(gld.l0_resid1);
     defer g_l0_resid1.deinit();
-    var g_l0_mlp = (try openGolden(io, "act_l0_mlp.bin")).?;
+    var g_l0_mlp = Golden.fromBytes(gld.l0_mlp);
     defer g_l0_mlp.deinit();
-    var g_l0_out = (try openGolden(io, "act_l0_out.bin")).?;
+    var g_l0_out = Golden.fromBytes(gld.l0_out);
     defer g_l0_out.deinit();
-    var g_l5_out = (try openGolden(io, "act_l5_out.bin")).?;
+    var g_l5_out = Golden.fromBytes(gld.l5_out);
     defer g_l5_out.deinit();
-    var g_lnf = (try openGolden(io, "act_lnf.bin")).?;
+    var g_lnf = Golden.fromBytes(gld.lnf);
     defer g_lnf.deinit();
 
     // Tap buffers.

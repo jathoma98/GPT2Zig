@@ -10,17 +10,8 @@ pub const Config = struct {
     ln_eps: f32, // 1e-5  (layer_norm_epsilon)
     eos_token_id: u32, // 50256
 
-    pub fn fromFile(io: std.Io, path: []const u8) !Config {
-        // config.json is ~700 bytes; read into a stack buffer (no mmap needed).
-        var io_buf: [512]u8 = undefined;
-        var json_buf: [4096]u8 = undefined;
-        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-        defer file.close(io);
-        const size = (try file.stat(io)).size;
-        assert(size <= json_buf.len);
-        var reader = file.reader(io, &io_buf);
-        try reader.interface.readSliceAll(json_buf[0..size]);
-
+    // config.json is embedded (see asset.zig); parse straight from the bytes.
+    pub fn fromBytes(bytes: []const u8) !Config {
         // Map only the fields we use; parseFromSliceLeaky + ignore_unknown_fields skips
         // the nested objects/arrays (task_specific_params, architectures) and unused scalars.
         const Raw = struct {
@@ -38,7 +29,7 @@ pub const Config = struct {
         const raw = try std.json.parseFromSliceLeaky(
             Raw,
             fba.allocator(),
-            json_buf[0..size],
+            bytes,
             .{ .ignore_unknown_fields = true },
         );
         // GPT-2 small must be gelu_new (tanh GELU); fail loudly if a mirror differs (see M2).
@@ -60,8 +51,9 @@ pub const Config = struct {
 // === Tests ===
 
 test "config parse bit-equiv" {
+    const asset = @import("asset/asset.zig");
     const golden = @import("../generated/safetensors_golden.zig");
-    const cfg = try Config.fromFile(std.testing.io, "models/gpt2/config.json");
+    const cfg = try Config.fromBytes(asset.config_json);
 
     try std.testing.expectEqual(golden.config.n_layer, cfg.n_layer);
     try std.testing.expectEqual(golden.config.n_head, cfg.n_head);

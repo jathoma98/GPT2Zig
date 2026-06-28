@@ -8,6 +8,7 @@ pub const config = @import("core/config.zig");
 pub const op = @import("core/op.zig");
 pub const model = @import("core/model.zig");
 pub const token = @import("core/token.zig");
+pub const asset = @import("core/asset/asset.zig");
 
 test {
     _ = @import("safetensors/safetensors.zig");
@@ -17,6 +18,7 @@ test {
     _ = @import("core/model.zig");
     _ = @import("core/testdata.zig");
     _ = @import("core/token.zig");
+    _ = @import("core/asset/asset.zig");
 }
 
 pub fn printAnotherMessage(writer: *Io.Writer) Io.Writer.Error!void {

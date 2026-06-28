@@ -7,10 +7,7 @@ const Model = GPT2Zig.model.Model;
 const Config = GPT2Zig.config.Config;
 const SafeTensors = GPT2Zig.safetensors.SafeTensors;
 const Tokenizer = GPT2Zig.token.Tokenizer;
-
-const MODEL = "models/gpt2/model.safetensors";
-const CONFIG = "models/gpt2/config.json";
-const BPE_BIN = GPT2Zig.token.BPE_BIN;
+const asset = GPT2Zig.asset;
 
 const DEFAULT_PROMPT = "Hello, I am";
 // Cap generated tokens. Kept modest because there's no KV cache yet (M6): each step recomputes the
@@ -37,13 +34,13 @@ pub fn main(init: std.process.Init) !void {
     const prompt: []const u8 = if (prompt_buf.items.len == 0) DEFAULT_PROMPT else prompt_buf.items;
 
     // === load model + tokenizer ===
-    var st = try SafeTensors.init(io, MODEL);
-    const cfg = try Config.fromFile(io, CONFIG);
+    var st = try SafeTensors.init(io, asset.model_safetensors_path);
+    const cfg = try Config.fromBytes(asset.config_json);
     var model = try Model.init(&st, cfg);
     st.deinit(); // weights copied; mmap no longer referenced
     defer model.deinit();
 
-    var tok = try Tokenizer.init(io, BPE_BIN);
+    var tok = try Tokenizer.fromBytes(asset.bpe);
     defer tok.deinit();
 
     const n_ctx: usize = cfg.n_ctx;

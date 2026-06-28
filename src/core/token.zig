@@ -1,6 +1,6 @@
 //! M4 GPT-2 byte-level BPE tokenizer. Consumes the packed table that tools/gen_bpe.zig emits
-//! (src/generated/bpe_tokenizer.bin) by mmap — runtime does zero construction: slice-cast the
-//! sections, binary-search for merges, index for decode. See gen_bpe.zig for the format and the
+//! (embedded via asset.bpe) — runtime does zero construction: slice-cast the sections,
+//! binary-search for merges, index for decode. See gen_bpe.zig for the format and the
 //! id-derivation facts.
 //!
 //! encode pipeline:  special-split → pre-tokenize (GPT-2 regex) → per-chunk BPE in id-space.
@@ -16,10 +16,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-const page = std.heap.page_size_min;
-
-pub const BPE_BIN = "src/generated/bpe_tokenizer.bin";
-
 const MAGIC: u32 = 0x42504531;
 const SPECIAL = "<|endoftext|>";
 
@@ -28,7 +24,6 @@ const SPECIAL = "<|endoftext|>";
 const MAX_CHUNK = 1 << 16;
 
 pub const Tokenizer = struct {
-    bytes: []align(page) const u8, // the mmap; munmap'd in deinit
     byte_to_id: []align(4) const u32, // [256]
     merge_keys: []align(8) const u64, // [n_merges] sorted ascending
     merge_vals: []align(4) const u32, // [n_merges] parallel
@@ -37,12 +32,10 @@ pub const Tokenizer = struct {
     n_tokens: u32,
     work: []u32, // reused per chunk; len == MAX_CHUNK
 
-    pub fn init(io: std.Io, path: []const u8) !Tokenizer {
-        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-        defer file.close(io);
-        const size = (try file.stat(io)).size;
-        assert(size >= 36);
-        const raw = try std.posix.mmap(null, size, .{ .READ = true }, .{ .TYPE = .PRIVATE }, file.handle, 0);
+    // `raw` is the embedded table (asset.bpe), forced to 8-byte alignment by asset.zig so the u64
+    // section is genuinely aligned. The byte slices below alias static rodata — nothing to free.
+    pub fn fromBytes(raw: []align(8) const u8) !Tokenizer {
+        assert(raw.len >= 36);
 
         var hdr: [9]u32 = undefined;
         for (&hdr, 0..) |*h, i| h.* = std.mem.readInt(u32, raw[i * 4 ..][0..4], .little);
@@ -55,13 +48,12 @@ pub const Tokenizer = struct {
         const off_doff = hdr[6];
         const off_blob = hdr[7];
         const blob_len = hdr[8];
-        assert(off_keys % 8 == 0); // u64 section must be 8-aligned within the page-aligned mmap
-        assert(off_blob + blob_len == size);
+        assert(off_keys % 8 == 0); // u64 section must be 8-aligned within the 8-aligned blob
+        assert(off_blob + blob_len == raw.len);
 
         const work = try std.heap.page_allocator.alloc(u32, MAX_CHUNK);
 
         return .{
-            .bytes = raw,
             .byte_to_id = sliceT(u32, raw, off_b2id, 256),
             .merge_keys = sliceT(u64, raw, off_keys, n_merges),
             .merge_vals = sliceT(u32, raw, off_vals, n_merges),
@@ -74,12 +66,11 @@ pub const Tokenizer = struct {
 
     pub fn deinit(self: *Tokenizer) void {
         std.heap.page_allocator.free(self.work);
-        std.posix.munmap(self.bytes);
     }
 
-    // Reinterpret a section of the page-aligned mmap as []T. Sound because every section offset the
-    // tool emits is a multiple of @alignOf(T) and the mmap base is page-aligned.
-    fn sliceT(comptime T: type, raw: []align(page) const u8, off: u32, n: u32) []align(@alignOf(T)) const T {
+    // Reinterpret a section of the 8-aligned blob as []T. Sound because every section offset the
+    // tool emits is a multiple of @alignOf(T) and the blob base is 8-aligned.
+    fn sliceT(comptime T: type, raw: []align(8) const u8, off: u32, n: u32) []align(@alignOf(T)) const T {
         const want = @as(usize, n) * @sizeOf(T);
         const seg: []align(@alignOf(T)) const u8 = @alignCast(raw[off..][0..want]);
         return std.mem.bytesAsSlice(T, seg);
@@ -278,15 +269,10 @@ fn startsWith(s: []const u8, prefix: []const u8) bool {
 // === Tests ===
 
 const testing = std.testing;
+const asset = @import("asset/asset.zig");
 
 fn openTok() !Tokenizer {
-    return Tokenizer.init(testing.io, BPE_BIN) catch |e| switch (e) {
-        error.FileNotFound => {
-            std.debug.print("missing {s} — run `zig build` to generate it\n", .{BPE_BIN});
-            return error.SkipZigTest;
-        },
-        else => e,
-    };
+    return Tokenizer.fromBytes(asset.bpe);
 }
 
 test "encode matches tiktoken goldens" {

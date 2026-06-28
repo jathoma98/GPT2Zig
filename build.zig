@@ -5,12 +5,16 @@ const std = @import("std");
 
 const VENV_PYTHON = "python/.venv/bin/python";
 const VENV_SENTINEL = "python/.venv/.deps_installed";
+// download_model.py materializes this symlink (into the venv-local HF cache). Its presence is what
+// distinguishes "deps ready" from "deps ready AND model present".
+const MODEL_PATH = "models/gpt2/model.safetensors";
 
 // Each variant owns exactly the data its stage needs; illegal combinations
 // (e.g. install_deps with no venv present) are unreachable by construction.
 const PythonVenvState = union(enum) {
     create_venv: struct { system_python: []const u8 },
     install_deps,
+    download_model,
     ready,
     failed: []const u8,
 };
@@ -26,15 +30,25 @@ fn reducePythonState(b: *std.Build) PythonVenvState {
         return .{ .create_venv = .{ .system_python = sys_python } };
 
     const sen = cwd.statFile(io, VENV_SENTINEL, .{}) catch return .install_deps;
-    const req = cwd.statFile(io, "python/requirements.txt", .{}) catch return .ready;
-    return if (sen.mtime.nanoseconds < req.mtime.nanoseconds) .install_deps else .ready;
+    const req = cwd.statFile(io, "python/requirements.txt", .{}) catch return readyOrDownload(io, cwd);
+    if (sen.mtime.nanoseconds < req.mtime.nanoseconds) return .install_deps;
+    return readyOrDownload(io, cwd);
+}
+
+// Deps are installed; the only thing left to decide is whether the model artifact exists. A missing
+// or dangling `models/gpt2` symlink (access follows links) drops us into the download stage — which
+// must run before the graph compiles, since asset.zig @embedFile's config.json from that dir.
+fn readyOrDownload(io: std.Io, cwd: std.Io.Dir) PythonVenvState {
+    cwd.access(io, MODEL_PATH, .{}) catch return .download_model;
+    return .ready;
 }
 
 fn ensureVenvReady(b: *std.Build) []const u8 {
     const io = b.graph.io;
     state: switch (reducePythonState(b)) {
         .create_venv => |p| continue :state transitionToInstallDeps(io, p.system_python),
-        .install_deps => continue :state transitionToReady(io),
+        .install_deps => continue :state transitionToDownloadModel(io),
+        .download_model => continue :state transitionToReady(io),
         .ready => return VENV_PYTHON,
         .failed => |msg| {
             std.log.err("{s}", .{msg});
@@ -50,13 +64,20 @@ fn transitionToInstallDeps(io: std.Io, system_python: []const u8) PythonVenvStat
     return .install_deps;
 }
 
-fn transitionToReady(io: std.Io) PythonVenvState {
+fn transitionToDownloadModel(io: std.Io) PythonVenvState {
     std.log.info("python: installing deps from python/requirements.txt", .{});
     runCommand(io, &.{ VENV_PYTHON, "-m", "pip", "install", "-r", "python/requirements.txt" }) catch
         return .{ .failed = "pip install failed" };
     const f = std.Io.Dir.cwd().createFile(io, VENV_SENTINEL, .{}) catch
         return .{ .failed = "failed to write venv sentinel" };
     f.close(io);
+    return .download_model;
+}
+
+fn transitionToReady(io: std.Io) PythonVenvState {
+    std.log.info("python: materializing gpt2 into the venv cache (python/.venv/hf_cache)", .{});
+    runCommand(io, &.{ VENV_PYTHON, "python/download_model.py" }) catch
+        return .{ .failed = "model download failed" };
     return .ready;
 }
 
@@ -120,10 +141,10 @@ pub fn build(b: *std.Build) void {
     // ==========================================
     // === Build-time tool: BPE table codegen ===
     //
-    // A host-target Zig program transforms models/gpt2/merges.txt into a packed, mmap-ready binary
-    // (src/generated/bpe_tokenizer.bin) that token.zig consumes with zero runtime construction.
-    // Compiling this is fast; doing the same transform at comptime OOM-kills the compiler. The .bin
-    // is mmap'd (not embedded), so only `run`/`test` need it on disk — not the exe compile.
+    // A host-target Zig program transforms models/gpt2/merges.txt into a packed binary that
+    // token.zig consumes with zero runtime construction. Compiling this is fast; doing the same
+    // transform at comptime OOM-kills the compiler. The .bin is embedded straight from this Run
+    // step's output (see asset_bpe below), so its LazyPath alone wires the compile→tool dependency.
     const bpe_tool = b.addExecutable(.{
         .name = "gen_bpe",
         .root_module = b.createModule(.{
@@ -136,10 +157,38 @@ pub fn build(b: *std.Build) void {
     gen_bpe_run.addFileArg(b.path("models/gpt2/merges.txt")); // tracked input → cache-invalidates
     const bpe_bin = gen_bpe_run.addOutputFileArg("bpe_tokenizer.bin");
 
-    const sync_bpe = b.addUpdateSourceFiles();
-    sync_bpe.addCopyFileToSource(bpe_bin, "src/generated/bpe_tokenizer.bin");
-    mod_tests.step.dependOn(&sync_bpe.step); // tests mmap the bin at runtime
-    run_cmd.step.dependOn(&sync_bpe.step); // so does the generation loop
+    // ===========================================================
+    // === Embedded assets (single source of truth: asset.zig) ===
+    //
+    // @embedFile can't reference paths outside the module root (src/), and the bpe bin is a build
+    // output, so each asset is exposed to asset.zig as a named build-graph import. Adding them to
+    // `mod` makes them visible to both the exe (imports GPT2Zig) and the test build (which IS mod);
+    // the LazyPath edges make every compile depend on the model download / bpe tool automatically.
+    mod.addAnonymousImport("asset_config", .{ .root_source_file = b.path("models/gpt2/config.json") });
+    mod.addAnonymousImport("asset_bpe", .{ .root_source_file = bpe_bin });
+
+    // Activation goldens come from the slow `gen-goldens` step and may be absent. Embed them only
+    // when all are present on disk; asset.zig reads `goldens_embedded` to expose them as optionals
+    // (and the forward-pass test skips when null). Checking presence here is a configure-phase
+    // decision, so a later `gen-goldens` run + rebuild flips the option on.
+    const golden_names = [_][]const u8{ "embed", "l0_ln1", "l0_attn", "l0_resid1", "l0_mlp", "l0_out", "l5_out", "lnf", "logits" };
+    var goldens_present = true;
+    for (golden_names) |name| {
+        std.Io.Dir.cwd().access(b.graph.io, b.fmt("src/generated/act_{s}.bin", .{name}), .{}) catch {
+            goldens_present = false;
+        };
+    }
+    const build_opts = b.addOptions();
+    build_opts.addOption(bool, "goldens_embedded", goldens_present);
+    mod.addOptions("build_options", build_opts);
+    if (goldens_present) {
+        for (golden_names) |name| {
+            mod.addAnonymousImport(
+                b.fmt("asset_act_{s}", .{name}),
+                .{ .root_source_file = b.path(b.fmt("src/generated/act_{s}.bin", .{name})) },
+            );
+        }
+    }
 
     // =================================
     // === Codegen: tokenizer golden ===
@@ -199,7 +248,6 @@ pub fn build(b: *std.Build) void {
     gen_goldens_step.dependOn(&gen_kernel_cmd.step);
     gen_goldens_step.dependOn(&gen_ref_cmd.step);
     gen_goldens_step.dependOn(&gen_act_cmd.step);
-    gen_goldens_step.dependOn(&sync_bpe.step);
 
     // Copy the cached golden outputs to a fixed, gitignored source path. Tests @import them
     // by relative path ("generated/…") instead of as build-graph named modules, so the same
