@@ -69,15 +69,85 @@ into some flat array of data structures. They are often more compact (not needin
 embed safety semantics.
 
 - For stateful code, you should reach for the 'reduce -> decide -> transition pattern'. A 'reduce' function is an ideally
-pure function which takes disparate program state data and reduces it to a 'decision' output, usually a tagged union specifying
-a decision based on the input state. A 'decider' is a switch over the 'reduce' function's output -- it determines what should
-be done based on the 'reduce' decision. 'transition' functions take a particular state machine and transitions it within
-a 'decider' switch block.
+pure function which takes disparate program state data and reduces it to a 'current state' output, usually a tagged union specifying 
+starting state for the state machine based on the current program state. 
+A 'decider' is a switch over the 'reduce' function's output -- it determines what should be done based on the current initial state. 
+'transition' functions take a particular state machine and transitions it within a 'decider' switch block, returning the new state.
 Ex:
 ```
-1. User clicks mouse -> produces MouseInputData
-2. reducer(MouseInputData, ProgramState) -> OpenDialogIntent (based on program state and user input, we reduce to a concrete user intent)
-3. switch (OpenDialogIntent) -> case OpenFoobarDialog |fb| { transitionFoobarState(fb) } (switch on decision, transition the relevant state)
+const Config  = struct { host: []const u8 };
+const Socket  = struct { /* fd, etc. */ };
+const Session = struct { socket: Socket };
+
+// ─────────────────────────────────────────────────────────────────────────
+// BAD: state lives in one external mutable bag. Every field is nullable
+// forever, so illegal combinations are representable (authed == true while
+// socket == null). reduce can't trust the payload to carry what a stage
+// needs, so it must defensively re-scan the whole struct every pass, and
+// each transition reaches into shared mutable state instead of receiving
+// exactly its inputs.
+// ─────────────────────────────────────────────────────────────────────────
+const Bag = struct {
+    config: Config,
+    socket: ?Socket = null,
+    authed: bool = false,
+    subscribed: bool = false,
+    err: ?anyerror = null,
+};
+
+fn reduceBad(b: *const Bag) Decision { /* re-derive from 4 fields every call */ }
+fn transitionOpenSocket(b: *Bag) void { b.socket = ...; } // mutates the bag
+
+// ─────────────────────────────────────────────────────────────────────────
+// GOOD: each state owns its data. You cannot be in `.authenticate` without
+// a Socket in hand — the illegal states are gone by construction. reduce
+// runs once to pick the entry point; after that the payloads thread the
+// data forward and each transition receives only what it needs.
+// ─────────────────────────────────────────────────────────────────────────
+const State = union(enum) {
+    open_socket:  struct { config: Config },
+    authenticate: struct { socket: Socket },
+    subscribe:    struct { socket: Socket },
+    ready:        struct { session: Session },
+    failed:       anyerror,
+};
+
+// reduce: initial observation only. Not in the loop — called once to decide
+// where we enter. Here it observes whether we're resuming on a live socket.
+fn reduce(config: Config, cached: ?Socket) State {
+    if (cached) |sock| return .{ .authenticate = .{ .socket = sock } };
+    return .{ .open_socket = .{ .config = config } };
+}
+
+// decide: labeled switch. Each arm hands the next transition the relevant
+// members of the current payload, nothing more.
+fn bringUp(config: Config, cached: ?Socket) !Session {
+    state: switch (reduce(config, cached)) {
+        .open_socket  => |p| continue :state transitionToAuthenticate(p.config),
+        .authenticate => |p| continue :state transitionToSubscribe(p.socket),
+        .subscribe    => |p| continue :state transitionToReady(p.socket),
+        .ready        => |p| return p.session,
+        .failed       => |e| return e,
+    }
+}
+
+// transitions: named for the state they LAND in. Each takes the prior
+// stage's relevant payload members (plus external data if needed), performs
+// its effect, and returns the next state with that stage's data captured.
+fn transitionToAuthenticate(config: Config) State {
+    const sock = openSocket(config) catch |e| return .{ .failed = e };
+    return .{ .authenticate = .{ .socket = sock } };
+}
+
+fn transitionToSubscribe(socket: Socket) State {
+    authenticate(socket) catch |e| return .{ .failed = e };
+    return .{ .subscribe = .{ .socket = socket } };
+}
+
+fn transitionToReady(socket: Socket) State {
+    subscribe(socket) catch |e| return .{ .failed = e };
+    return .{ .ready = .{ .session = .{ .socket = socket } } };
+}
 ```
 This allows complex state to read as a straight line algorithm that is trivially unit testable.
 
@@ -116,3 +186,16 @@ copying every tick's input and output data would have prohibitive perf character
 ## Python reference oracle
 
 All Python tooling lives under `python/` with a venv at `python/.venv`.
+
+## Zig 0.16 Surprises
+
+You were likely trained on Zig code prior to Zig 0.16, which has breaking changes to some Zig APIs.
+Whenever you encounter a changed Zig API, persist a concise inline correction here.
+
+CHANGES:
+- IO functions in Zig 0.16 require an `io` argument. You can get it from `std.testing.io` in tests.
+- `std.fs` is deprecated. Use `std.Io.Dir` instead: `std.Io.Dir.cwd()`, `dir.access(io, path, .{})`, `dir.statFile(io, path, .{})`, `dir.createFile(io, path, .{})`.
+- `std.process.Child.init()` is gone. Use `std.process.spawn(io, .{ .argv = ... })` to start a child; call `child.wait(io)` to reap it.
+- `Child.Term` variants are lowercase: `.exited`, `.signal`, `.stopped`, `.unknown` (not `.Exited` etc.).
+- `io: std.Io` is not a field on `*std.Build` directly — it lives at `b.graph.io`.
+- `std.Build.findProgram(b, names, paths)` resolves an executable from PATH (and build search prefixes) without spawning a subprocess. Prefer it over `which`.
