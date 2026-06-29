@@ -100,11 +100,134 @@ fn runCommand(io: std.Io, argv: []const []const u8) !void {
     }
 }
 
+// ================================
+// === Slang Compiler Bootstrap ===
+//
+// slangc is downloaded prebuilt (matching the BUILD machine, not the Zig target) from GitHub
+// releases and cached in the OS temp dir. The vendor/slang source tree is a backup only — we
+// never compile it. This wires host-detection -> download (curl) -> extract (native std.zip) ->
+// presence check; nothing consumes slangc yet. Mirrors the venv state machine above.
+
+const SLANG_VERSION = "2026.12";
+// slangc dynamically links libslang, so it only runs from a full extraction (bin/ + lib/). The
+// presence of this binary is what distinguishes "needs download" from "ready".
+const SLANG_EXE_NAME = if (builtin.os.tag == .windows) "slangc.exe" else "slangc";
+
+const SlangState = union(enum) {
+    download: struct { url: []const u8, archive_path: []const u8, dest_dir: []const u8 },
+    extract: struct { archive_path: []const u8, dest_dir: []const u8 },
+    ready,
+    failed: []const u8,
+};
+
+// Persistent cross-build cache root. std.Build.tmpPath exists but is auto-cleaned on build
+// success, which would force a redownload every run — so we resolve the OS temp dir from the
+// environment instead (the portable equivalent of a hardcoded /tmp).
+fn slangTempBase(b: *std.Build) []const u8 {
+    const env = b.graph.environ_map;
+    const base = if (builtin.os.tag == .windows)
+        (env.get("TEMP") orelse env.get("TMP") orelse "C:\\Windows\\Temp")
+    else
+        (env.get("TMPDIR") orelse "/tmp");
+    return b.pathJoin(&.{ base, "gpt-slang" });
+}
+
+fn slangcPath(b: *std.Build) []const u8 {
+    return b.pathJoin(&.{ slangTempBase(b), "bin", SLANG_EXE_NAME });
+}
+
+fn reduceSlangState(b: *std.Build) SlangState {
+    // builtin refers to the build machine here (build.zig runs on the host), so these map the
+    // host onto the release-archive naming. os.tag/cpu.arch are large external enums whose other
+    // members are all unsupported, so an else arm is justified over enumerating dozens of tags.
+    const os: []const u8 = switch (builtin.os.tag) {
+        .macos => "macos",
+        .linux => "linux",
+        .windows => "windows",
+        else => return .{ .failed = "unsupported host OS for slang (need macos/linux/windows)" },
+    };
+    const arch: []const u8 = switch (builtin.cpu.arch) {
+        .x86_64 => "x86_64",
+        .aarch64 => "aarch64",
+        else => return .{ .failed = "unsupported host arch for slang (need x86_64/aarch64)" },
+    };
+
+    const dest_dir = slangTempBase(b);
+
+    const io = b.graph.io;
+    std.Io.Dir.cwd().access(io, slangcPath(b), .{}) catch {
+        const archive_name = b.fmt("slang-{s}-{s}-{s}.zip", .{ SLANG_VERSION, os, arch });
+        return .{ .download = .{
+            .url = b.fmt("https://github.com/shader-slang/slang/releases/download/v{s}/{s}", .{ SLANG_VERSION, archive_name }),
+            .archive_path = b.pathJoin(&.{ dest_dir, archive_name }),
+            .dest_dir = dest_dir,
+        } };
+    };
+    return .ready;
+}
+
+fn ensureSlangReady(b: *std.Build) []const u8 {
+    state: switch (reduceSlangState(b)) {
+        .download => |p| continue :state transitionToSlangExtract(b, p.url, p.archive_path, p.dest_dir),
+        .extract => |p| continue :state transitionToSlangReady(b, p.archive_path, p.dest_dir),
+        .ready => return slangcPath(b),
+        .failed => |msg| {
+            std.log.err("{s}", .{msg});
+            std.process.exit(1);
+        },
+    }
+}
+
+fn transitionToSlangExtract(b: *std.Build, url: []const u8, archive_path: []const u8, dest_dir: []const u8) SlangState {
+    const io = b.graph.io;
+    std.log.info("slang: downloading {s}", .{url});
+
+    std.Io.Dir.cwd().createDirPath(io, dest_dir) catch return .{ .failed = "failed to create slang cache dir" };
+
+    // The build runner compiles std.http.Client with TLS disabled (std.options.http_disable_tls),
+    // so a native https fetch hits `unreachable` here. Shell out to curl instead — present on
+    // macOS, Win10+, and modern Linux — which handles TLS and the GitHub -> asset-CDN redirect
+    // (-L) and fails with a nonzero exit on HTTP errors (-f). Extraction stays native (std.zip).
+    runCommand(io, &.{ "curl", "-fL", "-o", archive_path, url }) catch return .{ .failed = "slang download failed (curl)" };
+
+    return .{ .extract = .{ .archive_path = archive_path, .dest_dir = dest_dir } };
+}
+
+fn transitionToSlangReady(b: *std.Build, archive_path: []const u8, dest_dir: []const u8) SlangState {
+    const io = b.graph.io;
+    const cwd = std.Io.Dir.cwd();
+    std.log.info("slang: extracting to {s}", .{dest_dir});
+
+    const archive = cwd.openFile(io, archive_path, .{}) catch return .{ .failed = "failed to open slang archive" };
+    defer archive.close(io);
+    var rbuf: [64 * 1024]u8 = undefined;
+    var fr = archive.reader(io, &rbuf);
+
+    var dest = cwd.openDir(io, dest_dir, .{}) catch return .{ .failed = "failed to open slang cache dir" };
+    defer dest.close(io);
+
+    std.zip.extract(dest, &fr, .{}) catch return .{ .failed = "slang extract failed" };
+
+    // std.zip doesn't carry the Unix exec bit through (entries land 0644), so slangc comes out
+    // non-executable. Restore it where an exec bit exists; on Windows execution is by extension
+    // (has_executable_bit == false) so this whole block compiles out.
+    if (std.Io.File.Permissions.has_executable_bit) {
+        const exe = dest.openFile(io, b.pathJoin(&.{ "bin", SLANG_EXE_NAME }), .{}) catch
+            return .{ .failed = "failed to open slangc to set exec bit" };
+        defer exe.close(io);
+        exe.setPermissions(io, std.Io.File.Permissions.fromMode(0o755)) catch
+            return .{ .failed = "failed to set slangc exec bit" };
+    }
+    return .ready;
+}
+
 // ============
 // === Build ===
 
 pub fn build(b: *std.Build) void {
     const venv_python = ensureVenvReady(b);
+    const slangc = ensureSlangReady(b);
+    std.log.info("slang: slangc ready at {s}", .{slangc});
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});

@@ -4,3 +4,4 @@ src/generated
 models/gpt2
 python/*.npy
 __pycache__
+tmp
