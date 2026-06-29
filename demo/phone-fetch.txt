@@ -1,0 +1,20 @@
+
+[1;32m         -o          o-[0m             [1m[1;32mshell@OnePlus[0m
+[1;32m          +hydNNNNdyh+[0m              [1;32m-------------[0m
+[1;32m        +mMMMMMMMMMMMMm+[0m            [1;32m[1mOS[0m: Android 16 (API 36) aarch64
+[1;32m      `dMMm:NMMMMMMN:mMMd`[0m          [1;32m[1mHost[0m: OnePlus CPH2583 (OP595DL1)
+[1;32m      hMMMMMMMMMMMMMMMMMMh[0m          [1;32m[1mKernel[0m: 6.1.118-android14-11
+[1;32m  ..  yyyyyyyyyyyyyyyyyyyy  ..[0m      [1;32m[1mUptime[0m: 59 days, 16 hours
+[1;32m.mMMm`MMMMMMMMMMMMMMMMMMMM`mMMm.[0m    [1;32m[1mShell[0m: mksh
+[1;32m:MMMM:MMMMMMMMMMMMMMMMMMMM:MMMM:[0m    [1;32m[1mCPU[0m: Qualcomm Snapdragon 8 Gen 3 (SM8650) (8)
+[1;32m:MMMM:MMMMMMMMMMMMMMMMMMMM:MMMM:[0m    [1;32m[1mGPU[0m: Qualcomm Adreno (TM) 750
+[1;32m:MMMM:MMMMMMMMMMMMMMMMMMMM:MMMM:[0m    [1;32m[1mVulkan[0m: 1.3 — compute (GPT-2 inference)
+[1;32m:MMMM:MMMMMMMMMMMMMMMMMMMM:MMMM:[0m    [1;32m[1mMemory[0m: ~14.8 GiB
+[1;32m-MMMM-MMMMMMMMMMMMMMMMMMMM-MMMM-[0m    
+[1;32m +yy+ MMMMMMMMMMMMMMMMMMMM +yy+[0m     [40m   [41m   [42m   [43m   [44m   [45m   [46m   [47m   [0m
+[1;32m      mMMMMMMMMMMMMMMMMMMm[0m          [100m   [101m   [102m   [103m   [104m   [105m   [106m   [107m   [0m
+[1;32m      `/++MMMMh++hMMMM++/`[0m          
+[1;32m          MMMMo  oMMMM[0m              
+[1;32m          MMMMo  oMMMM[0m              
+[1;32m          oNMm-  -mMNs[0m              
+

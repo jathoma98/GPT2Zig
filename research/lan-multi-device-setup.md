@@ -33,10 +33,14 @@ through a `socat`/port-forward shim. The master now binds a **configurable** int
 Files touched: `src/dist/runconfig.zig` (parse `listenAddr`), `src/dist/master.zig` (bind it),
 `src/main.zig` (thread it through). The wire protocol, framing, and FSMs are unchanged.
 
+`build.zig` also gained Android cross-compile support (a `-Dndk-sysroot` / `-Dandroid-api` option
+pair, scoped to the exe) so the phone slave can be built — see §6.
+
 Example configs live in `config/`:
 - [`config/master-3slaves.json`](../config/master-3slaves.json) — master, binds `0.0.0.0`, waits for 3 slaves.
 - [`config/slave-lan.json`](../config/slave-lan.json) — slave template; edit `masterAddr` to the Mac's LAN IP.
 - [`config/slave-adb.json`](../config/slave-adb.json) — phone slave; dials `127.0.0.1` (tunneled by adb).
+- [`config/android-local.json`](../config/android-local.json) — phone standalone smoke test (0 slaves, runs the whole model on-device).
 
 ---
 
@@ -169,17 +173,36 @@ zig build run -- config/slave.json
 ## 6. Slave 3 — OnePlus phone (Adreno, via adb)
 
 The phone runs the slave binary in `adb shell` (no Android Activity/APK), and its socket is tunneled
-to the Mac over USB with `adb reverse`. This is the fiddliest device — budget extra time.
+to the Mac over USB with `adb reverse`. **Validated end-to-end on a OnePlus (CPH2583, Adreno 750,
+Vulkan 1.3):** the cross-compiled binary runs from `adb shell`, finds the Adreno via the system
+Vulkan loader, uploads the 474 MB of weights, and generates text. No APK or root required.
 
-### 6a. Cross-compile the binary for Android (on the Mac)
+### 6a. Install the Android NDK (one-time, on the Mac)
+Zig can't synthesize bionic (Android's libc), so the exe link needs the NDK's crt objects + `libc.so`.
+Install it with the Android SDK's `sdkmanager` (path may differ if your SDK isn't in the default spot):
 ```bash
-zig build -Doptimize=ReleaseSafe -Dtarget=aarch64-linux-android
-# -> zig-out/bin/GPT2Zig (an aarch64 Android/bionic binary)
+SDKM=~/Library/Android/sdk/cmdline-tools/latest/bin/sdkmanager
+yes | "$SDKM" "ndk;27.3.13750724"
+# sysroot used below:
+NDK=~/Library/Android/sdk/ndk/27.3.13750724
+SYSROOT="$NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot"
 ```
-Bionic (Android's libc) is required so the binary can `dlopen` the device's `/system/lib64/libvulkan.so`.
-A musl/gnu static target cannot load the system Vulkan loader.
 
-### 6b. Push binary + model to the phone
+### 6b. Cross-compile the binary for Android (on the Mac)
+```bash
+zig build -Doptimize=ReleaseSafe -Dtarget=aarch64-linux-android.29 -Dndk-sysroot="$SYSROOT"
+# -> zig-out/bin/GPT2Zig: ELF aarch64 PIE, interpreter /system/bin/linker64
+```
+`build.zig` detects the `android` ABI and, scoped to the exe only (so the native host codegen tools
+aren't disturbed): writes a libc file pointing at the NDK sysroot, adds the API-level lib dir to the
+link path, and forces **dynamic** linkage (the NDK ships only `.so`, no `.a`, so a static link can't
+find `-lc`). `-Dndk-sysroot` is required for android targets; `-Dandroid-api` defaults to 29.
+
+Bionic is required so the binary can `dlopen` the device's `/system/lib64/libvulkan.so`; a musl/gnu
+static target cannot load the system Vulkan loader. The `.29` in the triple is the *minimum* API —
+any device on API ≥ 29 runs it.
+
+### 6c. Push binary + model to the phone
 `adb shell` runs with limited permissions; `/data/local/tmp` is the reliable writable, executable
 location:
 ```bash
@@ -192,7 +215,7 @@ adb shell chmod 755 /data/local/tmp/gpt2zig/GPT2Zig
 `config/slave-adb.json` already points `model_path` at `/data/local/tmp/gpt2zig/model.safetensors`
 and sets `masterAddr` to `127.0.0.1`.
 
-### 6c. Tunnel the phone's socket to the Mac
+### 6d. Tunnel the phone's socket to the Mac
 `adb reverse` makes a port on the *phone* forward to a port on the *Mac*:
 ```bash
 adb reverse tcp:9876 tcp:9876
@@ -200,17 +223,24 @@ adb reverse tcp:9876 tcp:9876
 Now when the slave on the phone dials `127.0.0.1:9876`, adb forwards it to the Mac's `127.0.0.1:9876`,
 which the `0.0.0.0`-bound master is listening on. (`adb reverse` resets on unplug/replug — re-run it.)
 
-### 6d. Run the slave
+### 6e. Run the slave
 ```bash
 adb shell "cd /data/local/tmp/gpt2zig && ./GPT2Zig slave.json"
 ```
 
-> Adreno exposes Vulkan 1.3 to native binaries, but running compute from a bare `adb shell` (outside
-> an app sandbox) can be hit-or-miss depending on OnePlus's OS build and SELinux policy. If
-> `Gpu.init` fails to find/load Vulkan, that's the likely culprit — this is the one device that may
-> need a real APK wrapper. Validate first with a Vulkan compute sample over adb shell before the demo,
-> and have a fallback (e.g. run slave 3 as a second process on the Mac, or drop to 2 slaves with
-> `config/master-2slaves.json`).
+To validate the device standalone *before* wiring up the fleet (recommended — this is exactly how the
+phone was verified), push `config/android-local.json` instead and run it as a 0-slave local master —
+it runs the whole model on the Adreno with no sockets:
+```bash
+adb push config/android-local.json /data/local/tmp/gpt2zig/local.json
+adb shell "cd /data/local/tmp/gpt2zig && ./GPT2Zig local.json"
+# expect: vk: using device 'Adreno (TM) 750' ... gpu: uploaded 474 MB ... generated text
+```
+
+> If `Gpu.init` reports Vulkan unavailable on a *different* phone (older Adreno, locked-down OEM
+> build, or SELinux denials on `/data/local/tmp` exec), fall back to running slave 3 as a second
+> process on the Mac, or drop to 2 slaves with `config/master-2slaves.json`. On the tested OnePlus
+> no such workaround was needed.
 
 ---
 

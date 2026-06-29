@@ -358,6 +358,33 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    // Android (bionic) cross builds: Zig can't synthesize bionic libc, so the exe link needs the
+    // NDK's crt objects + libc.so. Scope it to the exe via a libc file — a global --sysroot would
+    // wrongly redirect the native host codegen tools (reflect_codegen, gen_bpe) at this same sysroot.
+    if (target.result.abi == .android) {
+        const ndk_sysroot = b.option([]const u8, "ndk-sysroot", "Android NDK toolchain sysroot (required for android targets)") orelse
+            @panic("android target requires -Dndk-sysroot=<NDK>/toolchains/llvm/prebuilt/<host>/sysroot");
+        const api = b.option(u32, "android-api", "Android API level for the NDK lib dir (default 29)") orelse 29;
+        const triple = b.fmt("{s}-linux-android", .{@tagName(target.result.cpu.arch)});
+        const libc_conf = b.fmt(
+            \\include_dir={s}/usr/include
+            \\sys_include_dir={s}/usr/include/{s}
+            \\crt_dir={s}/usr/lib/{s}/{d}
+            \\gcc_dir=
+            \\msvc_lib_dir=
+            \\kernel32_lib_dir=
+            \\
+        , .{ ndk_sysroot, ndk_sysroot, triple, ndk_sysroot, triple, api });
+        const wf = b.addWriteFiles();
+        exe.setLibCFile(wf.add("android-libc.conf", libc_conf));
+        exe.step.dependOn(&wf.step);
+        // crt_dir gives Zig the crt objects, but -lc/-lm/-ldl still need this on the link search path.
+        exe.root_module.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/usr/lib/{s}/{d}", .{ ndk_sysroot, triple, api }) });
+        // The NDK ships only shared libc/libm/libdl (.so, no .a); force a dynamic PIE so lld links
+        // against those (and emits interpreter /system/bin/linker64) instead of hunting for .a files.
+        exe.linkage = .dynamic;
+    }
+
     b.installArtifact(exe);
 
     const run_step = b.step("run", "Run the app");

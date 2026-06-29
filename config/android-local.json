@@ -1,0 +1,8 @@
+{
+  "model_path": "/data/local/tmp/gpt2zig/model.safetensors",
+  "serverParams": {
+    "type": "master",
+    "prompt": "Hello, I am",
+    "expectedSlaves": 0
+  }
+}
