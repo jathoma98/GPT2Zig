@@ -390,8 +390,11 @@ pub fn build(b: *std.Build) void {
     sync_goldens.addCopyFileToSource(st_golden_zig, "src/generated/safetensors_golden.zig");
     sync_goldens.addCopyFileToSource(kernel_golden_zig, "src/generated/kernel_golden.zig");
 
-    // Only the test build references the goldens (all @imports are inside test blocks), so
-    // only the test compile needs them on disk first; the exe build does not.
+    // The golden values are only *used* in tests, but `@import` loads its target file eagerly
+    // during AstGen (even for imports inside test blocks), so any compile of these modules — exe
+    // included — needs the generated files present on disk to load, regardless of whether the
+    // contents are ever analyzed. Both the exe and the test build therefore depend on the sync.
+    exe.step.dependOn(&sync_goldens.step);
     mod_tests.step.dependOn(&sync_goldens.step);
 
     const test_step = b.step("test", "Run tests");

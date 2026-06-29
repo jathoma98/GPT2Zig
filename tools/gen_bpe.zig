@@ -37,7 +37,11 @@ pub fn main(init: std.process.Init) !void {
     const arena = arena_state.allocator();
 
     // === args: <exe> <merges_path> <out_path> ===
-    var args = init.minimal.args.iterate();
+    // iterateAllocator (not iterate) is the cross-platform form: Windows has no flat argv, so the
+    // command line is parsed into a heap buffer here (no-op deinit on POSIX). The returned arg
+    // slices point into that buffer, so the iterator must outlive their use below.
+    var args = try init.minimal.args.iterateAllocator(gpa);
+    defer args.deinit();
     _ = args.skip();
     const merges_path = args.next() orelse return error.MissingMergesArg;
     const out_path = args.next() orelse return error.MissingOutArg;

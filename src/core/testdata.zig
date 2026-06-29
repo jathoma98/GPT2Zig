@@ -51,22 +51,35 @@ pub const Golden = struct {
     }
 };
 
-// Compare an actual activation against a golden, reporting the worst element before asserting so a
-// failing tap tells you HOW far off it is (and where), not just that it diverged.
-pub fn expectClose(label: []const u8, golden: []align(1) const f32, actual: []const f32, tol: f32) !void {
+// Relative tolerance applied on top of the per-call absolute floor. f32 carries ~7 decimal digits,
+// and a forward pass accumulates rounding through many matmuls; by the deeper layers GPT-2's
+// residual stream has massive-activation outlier dims (magnitudes in the thousands), where a fixed
+// absolute tolerance would demand more precision than f32 physically holds. Comparing relative to
+// the golden's magnitude keeps the bound meaningful at every scale. Observed Zig-vs-PyTorch relative
+// error is ~1e-6 across all taps; 1e-5 leaves headroom for cross-platform float drift (FMA
+// contraction, SIMD reduction order, libm tanh/exp) while still catching real kernel bugs, which
+// diverge by orders of magnitude more.
+const REL_TOL: f32 = 1e-5;
+
+// Compare an actual activation against a golden with a mixed absolute+relative bound (numpy
+// allclose semantics: |g - a| <= atol + rtol*|g|). On failure it prints the worst-offending
+// element so a failing tap tells you HOW far off it is (and where), not just that it diverged;
+// passing taps stay silent to keep test output clean.
+pub fn expectClose(label: []const u8, golden: []align(1) const f32, actual: []const f32, atol: f32) !void {
     assert(golden.len == actual.len);
-    var max_diff: f32 = 0;
-    var max_idx: usize = 0;
+    var worst_excess: f32 = 0; // diff - threshold; >0 means out of tolerance
+    var worst_idx: usize = 0;
     for (golden, actual, 0..) |g, a, i| {
-        const d = @abs(g - a);
-        if (d > max_diff) {
-            max_diff = d;
-            max_idx = i;
+        const excess = @abs(g - a) - (atol + REL_TOL * @abs(g));
+        if (excess > worst_excess) {
+            worst_excess = excess;
+            worst_idx = i;
         }
     }
-    _ = label;
-    // std.debug.print("  {s}: max-abs-diff {e:.4} at [{d}] (golden {e:.6} vs actual {e:.6})\n", .{
-    //     label, max_diff, max_idx, golden[max_idx], actual[max_idx],
-    // });
-    if (max_diff > tol) return error.GoldenMismatch;
+    if (worst_excess > 0) {
+        std.debug.print("  {s}: out of tolerance at [{d}]: golden {e:.6} vs actual {e:.6} (excess {e:.4})\n", .{
+            label, worst_idx, golden[worst_idx], actual[worst_idx], worst_excess,
+        });
+        return error.GoldenMismatch;
+    }
 }
