@@ -10,10 +10,8 @@ const assert = std.debug.assert;
 const net = std.Io.net;
 const log = std.log.scoped(.net);
 
-const Model = @import("../core/model.zig").Model;
-const Config = @import("../core/config.zig").Config;
-const SafeTensors = @import("../safetensors/safetensors.zig").SafeTensors;
-const asset = @import("../core/asset/asset.zig");
+const gpu_mod = @import("../core/gpu.zig");
+const Gpu = gpu_mod.Gpu;
 const wire = @import("wire.zig");
 const partition = @import("partition.zig");
 
@@ -25,14 +23,15 @@ const CONN_BUF = 64 * 1024;
 const CONNECT_ATTEMPTS = 40;
 const CONNECT_RETRY_MS = 250;
 
-pub fn run(io: std.Io, model_path: []const u8, master_addr: []const u8) !void {
-    // === load the full model (we run only our shard, but loading all layers is simplest) ===
+pub fn run(io: std.Io, gpa: std.mem.Allocator, model_path: []const u8, master_addr: []const u8) !void {
+    // === load the full model onto the GPU (we run only our shard, but loading all is simplest) ===
     log.info("slave: loading model from {s}", .{model_path});
-    var st = try SafeTensors.init(io, model_path);
-    const cfg = try Config.fromBytes(asset.config_json);
-    var model = try Model.init(&st, cfg);
-    st.deinit(); // weights copied; mmap no longer referenced
-    defer model.deinit();
+    var g = (try Gpu.init(io, gpa, model_path, gpu_mod.defaultInstanceOpts())) orelse {
+        log.err("slave: Vulkan unavailable — cannot run GPU inference", .{});
+        return error.VulkanUnavailable;
+    };
+    defer g.deinit();
+    const cfg = g.cfg;
     const n_embd: u32 = cfg.n_embd;
     log.info("slave: model loaded (n_layer={d}, n_embd={d})", .{ cfg.n_layer, n_embd });
 
@@ -51,10 +50,14 @@ pub fn run(io: std.Io, model_path: []const u8, master_addr: []const u8) !void {
     var writer = net.Stream.Writer.init(reader.stream, io, &wbuf);
     log.info("slave: ready, serving layers [{d}, {d})", .{ range.lo, range.hi });
 
-    // === serve loop: recv x → runLayers → send x. EndOfStream = master closed = clean shutdown. ===
+    // CPU staging for the residual: wire → here → GPU → run → here → wire.
+    const x_cpu = try gpa.alloc(f32, cfg.n_ctx * n_embd);
+    defer gpa.free(x_cpu);
+
+    // === serve loop: recv x → upload → runLayers → readback → send x. EndOfStream = clean shutdown. ===
     var frame: usize = 0;
     while (true) : (frame += 1) {
-        const S = wire.recvActivations(&reader.interface, model.residual(), n_embd) catch |e| switch (e) {
+        const S = wire.recvActivations(&reader.interface, x_cpu, n_embd) catch |e| switch (e) {
             error.EndOfStream => {
                 log.info("slave: master closed the stream after {d} frame(s); shutting down", .{frame});
                 break;
@@ -64,17 +67,19 @@ pub fn run(io: std.Io, model_path: []const u8, master_addr: []const u8) !void {
                 return e;
             },
         };
-        const payload_bytes = @as(usize, S) * n_embd * @sizeOf(f32);
-        log.debug("slave: frame {d}: recv S={d} ({d} bytes)", .{ frame, S, payload_bytes });
+        const n: usize = @as(usize, S) * n_embd;
+        log.debug("slave: frame {d}: recv S={d}", .{ frame, S });
 
-        const x = model.residual()[0 .. @as(usize, S) * cfg.n_embd];
-        model.runLayers(x, S, range.lo, range.hi);
+        try g.writeResidual(S, x_cpu[0..n]); // CPU → GPU
+        try g.runLayers(S, range.lo, range.hi); // this shard's layers (on GPU)
+        g.deviceWaitIdle(); // finish all kernels before reading the residual back for the reply
+        try g.readResidual(S, x_cpu[0..n]); // GPU → CPU
 
-        wire.sendActivations(&writer.interface, x, S) catch |e| {
+        wire.sendActivations(&writer.interface, x_cpu[0..n], S) catch |e| {
             log.err("slave: send failed on frame {d}: {s}", .{ frame, @errorName(e) });
             return e;
         };
-        log.debug("slave: frame {d}: ran layers [{d},{d}), sent S={d} ({d} bytes)", .{ frame, range.lo, range.hi, S, payload_bytes });
+        log.debug("slave: frame {d}: ran layers [{d},{d}), sent S={d}", .{ frame, range.lo, range.hi, S });
     }
 }
 

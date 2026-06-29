@@ -197,6 +197,28 @@ pub fn init(opts: InitOptions) Init {
     } };
 }
 
+// The generic "skip if Vulkan/VVL unavailable" gate, lifted out of the instance test so every GPU
+// golden test (here and in src/core/gpu.zig) shares one policy: a missing loader / ICD / validation
+// layer / debug-utils extension is an environment skip; any other instance-create failure is a real
+// test failure. Device creation is NOT gated here — once the instance exists we expect a device, so
+// initDevice failure is a hard error (see device.zig).
+pub fn instanceOrSkip(opts: InitOptions) error{ SkipZigTest, VkInstanceCreateFailed }!VTbl {
+    switch (init(opts)) {
+        .library_not_found => return error.SkipZigTest,
+        .vk_error => |code| switch (code) {
+            c.VK_ERROR_LAYER_NOT_PRESENT,
+            c.VK_ERROR_EXTENSION_NOT_PRESENT,
+            c.VK_ERROR_INCOMPATIBLE_DRIVER,
+            => return error.SkipZigTest,
+            else => {
+                log.err("vkCreateInstance failed: {d}", .{code});
+                return error.VkInstanceCreateFailed;
+            },
+        },
+        .success => |vtbl| return vtbl,
+    }
+}
+
 // Debug-only: dump the layers/extensions the loader advertises. Fixed stack buffers cap the count
 // we materialize (the total is still logged); no allocation in the init path.
 fn logInstanceCapabilities(
@@ -231,10 +253,42 @@ fn logInstanceCapabilities(
 // Tests pass a pointer to one of these as pUserData. The messenger sets `.fired` on any
 // warning/error-severity message, and the test asserts it stayed false. No globals — state is
 // threaded through pUserData so concurrent tests don't clobber each other.
-pub const ValidationCapture = struct { fired: bool = false };
+pub const ValidationCapture = struct {
+    fired: bool = false,
+
+    // Defer-able assertion for tests: `defer cap.assertNoValidationErrors();`. A defer can't
+    // propagate an error, so a fired validation message panics (which fails the running test) —
+    // the detailed message was already logged at .err by captureCallback.
+    pub fn assertNoValidationErrors(self: *const ValidationCapture) void {
+        if (self.fired) @panic("Vulkan validation error(s) fired — see the validation log above");
+    }
+};
 
 const severity_warn_or_err: u32 = @intCast(c.VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
     c.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT);
+
+// Runtime debug callback (production, when validation is enabled in Debug builds): a validation
+// warning/error is a programming bug, so log it and abort immediately rather than let the engine
+// limp on with undefined GPU behavior. Tests use captureCallback instead (collect + assert).
+pub fn panicCallback(
+    severity: c.VkDebugUtilsMessageSeverityFlagBitsEXT,
+    types: c.VkDebugUtilsMessageTypeFlagsEXT,
+    data: [*c]const c.VkDebugUtilsMessengerCallbackDataEXT,
+    user: ?*anyopaque,
+) callconv(.c) c.VkBool32 {
+    _ = types;
+    _ = user;
+    const sev: u32 = @intCast(severity);
+    const msg: [*c]const u8 = if (data != null) data.*.pMessage else null;
+    const text = if (msg != null) std.mem.sliceTo(msg, 0) else "(no message)";
+    if (sev & severity_warn_or_err != 0) {
+        log.err("validation: {s}", .{text});
+        @panic("Vulkan validation error fired at runtime");
+    } else {
+        log.debug("validation: {s}", .{text});
+    }
+    return 0;
+}
 
 pub fn captureCallback(
     severity: c.VkDebugUtilsMessageSeverityFlagBitsEXT,
@@ -264,30 +318,15 @@ pub fn captureCallback(
 
 test "instance init + debug messenger sees no validation errors" {
     var cap: ValidationCapture = .{};
-    var result = init(.{
+    var vtbl = instanceOrSkip(.{
         .enable_validation = true,
         .debug_callback = captureCallback,
         .debug_user_data = &cap,
-    });
-
-    switch (result) {
-        // No Vulkan loader on this machine — nothing to test.
-        .library_not_found => return error.SkipZigTest,
-        // No ICD or no validation layer installed: skip rather than fail (CI/dev boxes vary).
-        .vk_error => |code| switch (code) {
-            c.VK_ERROR_LAYER_NOT_PRESENT,
-            c.VK_ERROR_EXTENSION_NOT_PRESENT,
-            c.VK_ERROR_INCOMPATIBLE_DRIVER,
-            => return error.SkipZigTest,
-            else => {
-                log.err("vkCreateInstance failed: {d}", .{code});
-                return error.VkInstanceCreateFailed;
-            },
-        },
-        .success => |*vtbl| {
-            defer vtbl.deinit();
-            try std.testing.expect(vtbl.instance != null);
-            try std.testing.expect(!cap.fired);
-        },
-    }
+    }) catch |e| switch (e) {
+        error.SkipZigTest => return error.SkipZigTest,
+        error.VkInstanceCreateFailed => return error.VkInstanceCreateFailed,
+    };
+    defer vtbl.deinit();
+    defer cap.assertNoValidationErrors();
+    try std.testing.expect(vtbl.instance != null);
 }

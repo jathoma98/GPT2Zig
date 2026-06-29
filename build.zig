@@ -221,13 +221,64 @@ fn transitionToSlangReady(b: *std.Build, archive_path: []const u8, dest_dir: []c
     return .ready;
 }
 
+// ==========================
+// === Slang shader pipeline ===
+//
+// The compute kernel set. Each is one .slang file in src/shaders/ (Regime 2: divergent kernels in
+// separate files; see research/slang-overview.md §5.3). The order is irrelevant — every kernel is
+// wired identically by addSlangKernel.
+const SHADER_KERNELS = [_][]const u8{
+    "matmul", "matmul_bt", "layernorm",   "softmax",      "gelu",
+    "embed",  "add",       "attn_scores", "attn_softmax", "attn_weighted_sum",
+};
+
+// Wire one kernel into the build graph: slangc -> {.spv, .reflect.json, .d}, then reflect_codegen
+// -> <name>_bindings.zig, then expose both the SPIR-V blob and the generated bindings to `mod` as
+// named anonymous imports (`@embedFile("<name>_spv")` / `@import("<name>_bindings")`). The data
+// dependencies make editing a .slang re-run slangc -> re-run codegen -> recompile the host; the
+// depfile additionally tracks `import`ed .slang modules. Flags are the dev profile from §2:
+// spirv_1_6 + scalar layout + row-major + warnings-as-errors + restrictive caps + precise FP (so
+// GPU results track the CPU/numpy oracle).
+fn addSlangKernel(
+    b: *std.Build,
+    mod: *std.Build.Module,
+    codegen_exe: *std.Build.Step.Compile,
+    slangc: []const u8,
+    name: []const u8,
+) void {
+    const slang = b.addSystemCommand(&.{slangc});
+    slang.addFileArg(b.path(b.fmt("src/shaders/{s}.slang", .{name}))); // tracked input
+    slang.addArgs(&.{
+        "-target",                       "spirv",
+        "-std",                          "2026",
+        "-capability",                   "spirv_1_6",
+        "-fvk-use-scalar-layout",        "-matrix-layout-row-major",
+        "-warnings-as-errors",           "all",
+        "-restrictive-capability-check", "-fp-mode",
+        "precise",                       "-O0",
+        "-g3",
+    });
+    slang.addArg("-reflection-json");
+    const reflect_json = slang.addOutputFileArg(b.fmt("{s}.reflect.json", .{name}));
+    slang.addArg("-o");
+    const spv = slang.addOutputFileArg(b.fmt("{s}.spv", .{name}));
+    slang.addArg("-depfile");
+    _ = slang.addDepFileOutputArg(b.fmt("{s}.d", .{name})); // std parses it -> tracks import'ed .slang
+
+    const gen = b.addRunArtifact(codegen_exe);
+    gen.addFileArg(reflect_json); // LazyPath input wires slang -> gen
+    const bindings = gen.addOutputFileArg(b.fmt("{s}_bindings.zig", .{name}));
+
+    mod.addAnonymousImport(b.fmt("{s}_spv", .{name}), .{ .root_source_file = spv });
+    mod.addAnonymousImport(b.fmt("{s}_bindings", .{name}), .{ .root_source_file = bindings });
+}
+
 // ============
 // === Build ===
 
 pub fn build(b: *std.Build) void {
     const venv_python = ensureVenvReady(b);
     const slangc = ensureSlangReady(b);
-    std.log.info("slang: slangc ready at {s}", .{slangc});
 
     // Vulkan ICDs/MoltenVK are loaded into the process via dlopen and link libc themselves; the
     // host process must therefore be a libc build. On Linux the musl default would also produce a
@@ -274,6 +325,19 @@ pub fn build(b: *std.Build) void {
             .{ .name = "vk", .module = vk_mod },
         },
     });
+
+    // === Slang kernels: slangc + reflect_codegen, exposed to `mod` as spv/bindings imports ===
+    // The codegen tool runs on the BUILD host (b.graph.host), like gen_bpe. Each kernel's SPIR-V and
+    // generated bindings become @embedFile/@import targets consumed by src/core/gpu.zig.
+    const codegen_exe = b.addExecutable(.{
+        .name = "reflect_codegen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/reflect_codegen.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    for (SHADER_KERNELS) |k| addSlangKernel(b, mod, codegen_exe, slangc, k);
 
     const exe = b.addExecutable(.{
         .name = "GPT2Zig",
@@ -445,9 +509,23 @@ pub fn build(b: *std.Build) void {
     });
     const run_vk_tests = b.addRunArtifact(vk_tests);
 
+    // The reflect_codegen host tool has its own unit tests (the compile-time-safety codegen is the
+    // shader interface authority, so it's hardened against malformed/edge-case reflection JSON).
+    const codegen_tests = b.addTest(.{
+        .name = "reflect-codegen-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/reflect_codegen.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+        .filters = test_filters,
+    });
+    const run_codegen_tests = b.addRunArtifact(codegen_tests);
+
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_vk_tests.step);
+    test_step.dependOn(&run_codegen_tests.step);
 
     // `zig build test-debug -Dtest-filter=<name>` builds (but does not run) the unit-test
     // binary to a stable path for the VSCode debugger. Subdir test files (core/*.zig) can't

@@ -12,9 +12,8 @@ const Io = std.Io;
 const net = std.Io.net;
 const log = std.log.scoped(.net);
 
-const Model = @import("../core/model.zig").Model;
-const Config = @import("../core/config.zig").Config;
-const SafeTensors = @import("../safetensors/safetensors.zig").SafeTensors;
+const gpu_mod = @import("../core/gpu.zig");
+const Gpu = gpu_mod.Gpu;
 const Tokenizer = @import("../core/token.zig").Tokenizer;
 const asset = @import("../core/asset/asset.zig");
 const wire = @import("wire.zig");
@@ -41,13 +40,14 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, model_path: []const u8, prompt: [
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const out = &stdout_file_writer.interface;
 
-    // === load model + tokenizer ===
+    // === load model (onto the GPU) + tokenizer ===
     log.info("master: loading model from {s} ({d} expected slave(s))", .{ model_path, expected_slaves });
-    var st = try SafeTensors.init(io, model_path);
-    const cfg = try Config.fromBytes(asset.config_json);
-    var model = try Model.init(&st, cfg);
-    st.deinit(); // weights copied; mmap no longer referenced
-    defer model.deinit();
+    var g = (try Gpu.init(io, gpa, model_path, gpu_mod.defaultInstanceOpts())) orelse {
+        log.err("master: Vulkan unavailable — cannot run GPU inference", .{});
+        return error.VulkanUnavailable;
+    };
+    defer g.deinit();
+    const cfg = g.cfg;
 
     var tok = try Tokenizer.fromBytes(asset.bpe);
     defer tok.deinit();
@@ -88,33 +88,41 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, model_path: []const u8, prompt: [
     const logits = try std.heap.page_allocator.alloc(f32, n_ctx * vocab);
     defer std.heap.page_allocator.free(logits);
 
+    // CPU staging for the residual stream during a broadcast: GPU → here → wire → here → GPU.
+    const x_cpu = try gpa.alloc(f32, n_ctx * n_embd);
+    defer gpa.free(x_cpu);
+
     try out.writeAll(prompt);
     try out.flush();
 
     // === greedy generation loop (no KV cache — recomputes the whole sequence each step) ===
     var produced: usize = 0;
     while (produced < MAX_NEW and len < n_ctx) : (produced += 1) {
-        const payload_bytes = len * cfg.n_embd * @sizeOf(f32);
-        const x = model.embed(ids[0..len], .{}); // HEAD
-        model.runLayers(x, len, master_range.lo, master_range.hi); // master front chunk
+        try g.embed(ids[0..len], .{}); // HEAD (on GPU)
+        try g.runLayers(len, master_range.lo, master_range.hi); // master front chunk (on GPU)
         log.debug("master: step {d}: S={d}, ran [{d},{d}), routing through {d} slave(s)", .{ produced, len, master_range.lo, master_range.hi, slaves.len });
 
-        // Route through each slave in pipeline order; the reply overwrites x in place.
-        for (slaves, 0..) |*sc, i| {
-            wire.sendActivations(&sc.writer.interface, x, @intCast(len)) catch |e| {
-                log.err("master: step {d}: send to slave {d} failed: {s}", .{ produced, i, @errorName(e) });
-                return e;
-            };
-            log.debug("master: step {d}: → slave {d} sent S={d} ({d} bytes), awaiting reply", .{ produced, i, len, payload_bytes });
-            const got = wire.recvActivations(&sc.reader.interface, model.residual(), n_embd) catch |e| {
-                log.err("master: step {d}: recv from slave {d} failed: {s}", .{ produced, i, @errorName(e) });
-                return e;
-            };
-            log.debug("master: step {d}: ← slave {d} reply S={d}", .{ produced, i, got });
-            assert(got == len);
+        if (slaves.len > 0) {
+            // The broadcast boundary: finish all kernels, copy the residual to CPU, route it through
+            // each slave in pipeline order (reply overwrites x_cpu), then upload it back for the TAIL.
+            g.deviceWaitIdle();
+            try g.readResidual(len, x_cpu[0 .. len * n_embd]);
+            for (slaves, 0..) |*sc, i| {
+                wire.sendActivations(&sc.writer.interface, x_cpu[0 .. len * n_embd], @intCast(len)) catch |e| {
+                    log.err("master: step {d}: send to slave {d} failed: {s}", .{ produced, i, @errorName(e) });
+                    return e;
+                };
+                const got = wire.recvActivations(&sc.reader.interface, x_cpu, n_embd) catch |e| {
+                    log.err("master: step {d}: recv from slave {d} failed: {s}", .{ produced, i, @errorName(e) });
+                    return e;
+                };
+                log.debug("master: step {d}: ↔ slave {d} reply S={d}", .{ produced, i, got });
+                assert(got == len);
+            }
+            try g.writeResidual(len, x_cpu[0 .. len * n_embd]);
         }
 
-        model.tail(x, len, logits[0 .. len * vocab], .{}); // TAIL (master owns wte)
+        try g.tail(len, logits[0 .. len * vocab], .{}); // TAIL (master owns wte; reads logits back to CPU)
 
         const last = logits[(len - 1) * vocab ..][0..vocab];
         var next: usize = 0;
