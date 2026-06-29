@@ -10,6 +10,7 @@ pub const model = @import("core/model.zig");
 pub const token = @import("core/token.zig");
 pub const asset = @import("core/asset/asset.zig");
 pub const platform = @import("core/platform/platform.zig");
+pub const vk = @import("vk");
 
 pub const dist = struct {
     pub const runconfig = @import("dist/runconfig.zig");

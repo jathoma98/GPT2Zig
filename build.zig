@@ -229,12 +229,50 @@ pub fn build(b: *std.Build) void {
     const slangc = ensureSlangReady(b);
     std.log.info("slang: slangc ready at {s}", .{slangc});
 
-    const target = b.standardTargetOptions(.{});
+    // Vulkan ICDs/MoltenVK are loaded into the process via dlopen and link libc themselves; the
+    // host process must therefore be a libc build. On Linux the musl default would also produce a
+    // statically-linked binary that can't host a glibc driver, so default the abi to gnu (a
+    // user-supplied -Dtarget still overrides). macOS/Windows ignore the abi hint.
+    const target = b.standardTargetOptions(.{
+        .default_target = if (builtin.os.tag == .linux) .{ .abi = .gnu } else .{},
+    });
     const optimize = b.standardOptimizeOption(.{});
+
+    // ==========================
+    // === Vulkan bindings ===
+    //
+    // translate-c the vendored Vulkan headers into a Zig module against the TARGET ABI (not the
+    // host) so struct layouts/enum widths match the binary we ship. VK_NO_PROTOTYPES drops the
+    // extern vk* function decls, leaving only PFN_* typedefs + types — we load every function
+    // pointer ourselves (see src/vk/vtbl.zig), so nothing links against a system libvulkan.
+    const vk_tc = b.addTranslateC(.{
+        .root_source_file = b.path("src/vk/include/vulkan/vulkan.h"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    vk_tc.addIncludePath(b.path("src/vk/include"));
+    vk_tc.defineCMacro("VK_NO_PROTOTYPES", "1");
+    const vulkan_c = vk_tc.addModule("vulkan_c");
+
+    // Dedicated module whose ONLY import is the bindings: vtbl.zig is used for early init-time
+    // sanity checks, so it must stay free of any project dependency. A separate module makes that
+    // structurally enforced — nothing but `vulkan_c` and std is in its import graph.
+    const vk_mod = b.createModule(.{
+        .root_source_file = b.path("src/vk/vk.zig"),
+        .target = target,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "vulkan_c", .module = vulkan_c },
+        },
+    });
 
     const mod = b.addModule("GPT2Zig", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "vk", .module = vk_mod },
+        },
     });
 
     const exe = b.addExecutable(.{
@@ -243,6 +281,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
             .imports = &.{
                 .{ .name = "GPT2Zig", .module = mod },
             },
@@ -397,8 +436,18 @@ pub fn build(b: *std.Build) void {
     exe.step.dependOn(&sync_goldens.step);
     mod_tests.step.dependOn(&sync_goldens.step);
 
+    // The vk module is separate from GPT2Zig, so its tests are invisible to mod_tests — give it
+    // its own test artifact. It needs no generated goldens, only the translate-c output.
+    const vk_tests = b.addTest(.{
+        .name = "vk-tests",
+        .root_module = vk_mod,
+        .filters = test_filters,
+    });
+    const run_vk_tests = b.addRunArtifact(vk_tests);
+
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
+    test_step.dependOn(&run_vk_tests.step);
 
     // `zig build test-debug -Dtest-filter=<name>` builds (but does not run) the unit-test
     // binary to a stable path for the VSCode debugger. Subdir test files (core/*.zig) can't
