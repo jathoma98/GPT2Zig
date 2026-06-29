@@ -9,15 +9,59 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("vulkan_c");
+const windows = std.os.windows;
 
 const log = std.log.scoped(.vk);
+
+const is_windows = builtin.os.tag == .windows;
 
 // =========================
 // === Library loading ===
 
+// Zig 0.16's std.DynLib has no `.windows` arm — it falls into an @compileError("unsupported
+// platform") branch, so it can't load vulkan-1.dll. We only need open/lookup/close, so wrap the OS
+// primitive directly: LoadLibraryA/GetProcAddress/FreeLibrary on Windows (mirroring volk's loader),
+// std.DynLib elsewhere. The split is comptime-known so the untaken branch never analyzes — Windows
+// never references std.DynLib, and non-Windows never references these kernel32 externs.
+extern "kernel32" fn LoadLibraryA(lpLibFileName: [*:0]const u8) callconv(.winapi) ?windows.HMODULE;
+extern "kernel32" fn GetProcAddress(hModule: windows.HMODULE, lpProcName: [*:0]const u8) callconv(.winapi) ?*anyopaque;
+extern "kernel32" fn FreeLibrary(hModule: windows.HMODULE) callconv(.winapi) windows.BOOL;
+
+const DynLib = struct {
+    inner: if (is_windows) windows.HMODULE else std.DynLib,
+
+    fn open(name: [*:0]const u8) ?DynLib {
+        if (is_windows) {
+            return .{ .inner = LoadLibraryA(name) orelse return null };
+        } else {
+            return .{ .inner = std.DynLib.openZ(name) catch return null };
+        }
+    }
+
+    fn lookup(self: *DynLib, comptime T: type, name: [:0]const u8) ?T {
+        if (is_windows) {
+            const p = GetProcAddress(self.inner, name.ptr) orelse return null;
+            // Cast to T (itself an optional fn-pointer) before the ?T wrap, else @ptrCast sees a
+            // double optional and rejects it as a non-pointer target.
+            const f: T = @ptrCast(p);
+            return f;
+        } else {
+            return self.inner.lookup(T, name);
+        }
+    }
+
+    fn close(self: *DynLib) void {
+        if (is_windows) {
+            _ = FreeLibrary(self.inner);
+        } else {
+            self.inner.close();
+        }
+    }
+};
+
 // volk's per-OS candidate order. We try each in turn and take the first that loads.
-fn openVulkanLib() ?std.DynLib {
-    const candidates: []const []const u8 = switch (builtin.os.tag) {
+fn openVulkanLib() ?DynLib {
+    const candidates: []const [*:0]const u8 = switch (builtin.os.tag) {
         // The explicit /usr/local/lib path matters: modern macOS doesn't search it for a bare
         // dlopen name, but the Vulkan SDK installs the loader there (volk hits the same case).
         .macos => &.{ "libvulkan.dylib", "libvulkan.1.dylib", "/usr/local/lib/libvulkan.dylib", "libMoltenVK.dylib" },
@@ -25,7 +69,7 @@ fn openVulkanLib() ?std.DynLib {
         else => &.{ "libvulkan.so.1", "libvulkan.so" },
     };
     for (candidates) |name| {
-        if (std.DynLib.open(name)) |lib| return lib else |_| {}
+        if (DynLib.open(name)) |lib| return lib;
     }
     return null;
 }
@@ -61,7 +105,7 @@ pub const Init = union(enum) {
 // === Function table ===
 
 pub const VTbl = struct {
-    lib: std.DynLib,
+    lib: DynLib,
     instance: c.VkInstance,
     messenger: c.VkDebugUtilsMessengerEXT,
 
