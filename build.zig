@@ -232,22 +232,28 @@ const SHADER_KERNELS = [_][]const u8{
     "embed",  "add",       "attn_scores", "attn_softmax", "attn_weighted_sum",
 };
 
-// Wire one kernel into the build graph: slangc -> {.spv, .reflect.json, .d}, then reflect_codegen
+// Wire one kernel into the build graph: slangc -> {.spv, .reflect.json}, then reflect_codegen
 // -> <name>_bindings.zig, then expose both the SPIR-V blob and the generated bindings to `mod` as
 // named anonymous imports (`@embedFile("<name>_spv")` / `@import("<name>_bindings")`). The data
-// dependencies make editing a .slang re-run slangc -> re-run codegen -> recompile the host; the
-// depfile additionally tracks `import`ed .slang modules. Flags are the dev profile from §2:
-// spirv_1_6 + scalar layout + row-major + warnings-as-errors + restrictive caps + precise FP (so
-// GPU results track the CPU/numpy oracle).
+// dependencies make editing a .slang re-run slangc -> re-run codegen -> recompile the host.
+//
+// `all_sources` is every .slang file: each is registered as a tracked input so editing ANY shader
+// recompiles ALL kernels. This is coarser than slangc's -depfile (which tracks only the modules a
+// kernel actually `import`s) but slangc emits Make-escaped Windows paths (`C\:\\...`) that Zig's
+// depfile parser mis-reads as bad path names — so we trade precision for a portable, correct
+// invalidation rule. Flags are the dev profile from §2: spirv_1_6 + scalar layout + row-major +
+// warnings-as-errors + restrictive caps + precise FP (so GPU results track the CPU/numpy oracle).
 fn addSlangKernel(
     b: *std.Build,
     mod: *std.Build.Module,
     codegen_exe: *std.Build.Step.Compile,
     slangc: []const u8,
     name: []const u8,
+    all_sources: []const std.Build.LazyPath,
 ) void {
     const slang = b.addSystemCommand(&.{slangc});
-    slang.addFileArg(b.path(b.fmt("src/shaders/{s}.slang", .{name}))); // tracked input
+    slang.addFileArg(b.path(b.fmt("src/shaders/{s}.slang", .{name}))); // the file being compiled
+    for (all_sources) |src| slang.addFileInput(src); // any shader change -> recompile this kernel
     slang.addArgs(&.{
         "-target",                       "spirv",
         "-std",                          "2026",
@@ -262,8 +268,6 @@ fn addSlangKernel(
     const reflect_json = slang.addOutputFileArg(b.fmt("{s}.reflect.json", .{name}));
     slang.addArg("-o");
     const spv = slang.addOutputFileArg(b.fmt("{s}.spv", .{name}));
-    slang.addArg("-depfile");
-    _ = slang.addDepFileOutputArg(b.fmt("{s}.d", .{name})); // std parses it -> tracks import'ed .slang
 
     const gen = b.addRunArtifact(codegen_exe);
     gen.addFileArg(reflect_json); // LazyPath input wires slang -> gen
@@ -337,7 +341,9 @@ pub fn build(b: *std.Build) void {
             .optimize = .Debug,
         }),
     });
-    for (SHADER_KERNELS) |k| addSlangKernel(b, mod, codegen_exe, slangc, k);
+    var shader_sources: [SHADER_KERNELS.len]std.Build.LazyPath = undefined;
+    for (SHADER_KERNELS, 0..) |k, i| shader_sources[i] = b.path(b.fmt("src/shaders/{s}.slang", .{k}));
+    for (SHADER_KERNELS) |k| addSlangKernel(b, mod, codegen_exe, slangc, k, &shader_sources);
 
     const exe = b.addExecutable(.{
         .name = "GPT2Zig",
