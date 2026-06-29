@@ -1,0 +1,7 @@
+{
+  "model_path": "/data/local/tmp/gpt2zig/model.safetensors",
+  "serverParams": {
+    "type": "slave",
+    "masterAddr": "127.0.0.1"
+  }
+}

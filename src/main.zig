@@ -29,7 +29,7 @@ pub fn main(init: std.process.Init) !void {
     const cfg = try dist.runconfig.fromBytes(arena, bytes);
 
     switch (cfg) {
-        .master => |m| try dist.master.run(io, gpa, m.model_path, m.prompt, m.expected_slaves),
+        .master => |m| try dist.master.run(io, gpa, m.model_path, m.prompt, m.expected_slaves, m.listen_addr),
         .slave => |s| try dist.slave.run(io, gpa, s.model_path, s.master_addr),
     }
 }

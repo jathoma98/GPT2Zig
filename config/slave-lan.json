@@ -1,0 +1,7 @@
+{
+  "model_path": "models/gpt2/model.safetensors",
+  "serverParams": {
+    "type": "slave",
+    "masterAddr": "192.168.1.42"
+  }
+}

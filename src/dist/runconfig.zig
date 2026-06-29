@@ -9,6 +9,7 @@ pub const RunConfig = union(enum) {
         model_path: []const u8,
         prompt: []const u8,
         expected_slaves: u32, // 0 ⇒ pure local mode (no sockets, single-process forward)
+        listen_addr: []const u8, // interface to bind; "0.0.0.0" ⇒ all LAN interfaces, "127.0.0.1" ⇒ loopback only
     },
     slave: struct {
         model_path: []const u8,
@@ -16,13 +17,14 @@ pub const RunConfig = union(enum) {
     },
 };
 
-// JSON: { "model_path": "...", "serverParams": { "type": "master"|"slave", "prompt"?, "expectedSlaves"?, "masterAddr"? } }
+// JSON: { "model_path": "...", "serverParams": { "type": "master"|"slave", "prompt"?, "expectedSlaves"?, "listenAddr"?, "masterAddr"? } }
 const Raw = struct {
     model_path: []const u8,
     serverParams: struct {
         type: []const u8,
         prompt: ?[]const u8 = null,
         expectedSlaves: ?u32 = null,
+        listenAddr: ?[]const u8 = null, // master only: bind interface; defaults to "0.0.0.0" (all LAN)
         masterAddr: ?[]const u8 = null,
     },
 };
@@ -37,6 +39,7 @@ pub fn fromBytes(arena: std.mem.Allocator, bytes: []const u8) !RunConfig {
             .model_path = raw.model_path,
             .prompt = sp.prompt orelse return error.MasterMissingPrompt,
             .expected_slaves = sp.expectedSlaves orelse return error.MasterMissingExpectedSlaves,
+            .listen_addr = sp.listenAddr orelse "0.0.0.0",
         } };
     }
     if (std.mem.eql(u8, sp.type, "slave")) {
@@ -63,6 +66,19 @@ test "parse master config" {
     try std.testing.expectEqualStrings("models/gpt2/model.safetensors", cfg.master.model_path);
     try std.testing.expectEqualStrings("Hello, I am", cfg.master.prompt);
     try std.testing.expectEqual(@as(u32, 1), cfg.master.expected_slaves);
+    try std.testing.expectEqualStrings("0.0.0.0", cfg.master.listen_addr); // defaults to all LAN interfaces
+}
+
+test "parse master config with custom listenAddr" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const json =
+        \\{ "model_path": "m.safetensors",
+        \\  "serverParams": { "type": "master", "prompt": "hi", "expectedSlaves": 3, "listenAddr": "127.0.0.1" } }
+    ;
+    const cfg = try fromBytes(arena.allocator(), json);
+    try std.testing.expect(cfg == .master);
+    try std.testing.expectEqualStrings("127.0.0.1", cfg.master.listen_addr);
 }
 
 test "parse slave config defaults to localhost" {

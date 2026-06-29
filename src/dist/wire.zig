@@ -13,7 +13,8 @@ comptime {
     assert(builtin.cpu.arch.endian() == .little);
 }
 
-// All processes are the same binary on the same loopback host for this PoC, so one fixed port.
+// One fixed port for the whole fleet. The master binds it on its chosen interface (loopback or all
+// LAN, per the config's listenAddr); every slave dials this same port on the master's address.
 pub const PORT: u16 = 9876;
 
 pub const FrameKind = enum(u8) {

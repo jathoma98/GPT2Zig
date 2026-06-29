@@ -35,7 +35,7 @@ const SlaveConn = struct {
     writer: net.Stream.Writer,
 };
 
-pub fn run(io: std.Io, gpa: std.mem.Allocator, model_path: []const u8, prompt: []const u8, expected_slaves: u32) !void {
+pub fn run(io: std.Io, gpa: std.mem.Allocator, model_path: []const u8, prompt: []const u8, expected_slaves: u32, listen_addr: []const u8) !void {
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const out = &stdout_file_writer.interface;
@@ -64,8 +64,11 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, model_path: []const u8, prompt: [
     const bufs = try gpa.alloc(ConnBufs, expected_slaves);
     defer gpa.free(bufs);
     if (expected_slaves > 0) {
-        const addr = try net.IpAddress.parse("127.0.0.1", wire.PORT);
-        try bringUpMaster(io, addr, participants, cfg.n_layer, slaves, bufs);
+        const addr = net.IpAddress.parse(listen_addr, wire.PORT) catch |e| {
+            log.err("master: invalid listenAddr \"{s}\": {s}", .{ listen_addr, @errorName(e) });
+            return e;
+        };
+        try bringUpMaster(io, addr, listen_addr, participants, cfg.n_layer, slaves, bufs);
     } else {
         log.info("master: local mode (0 slaves) — running the whole model in-process, no sockets", .{});
     }
@@ -155,13 +158,14 @@ const BringUp = union(enum) {
 fn bringUpMaster(
     io: std.Io,
     addr: net.IpAddress,
+    listen_addr: []const u8, // for logging only; the bound interface is `addr`
     participants: usize,
     n_layer: usize,
     slaves: []SlaveConn,
     bufs: []ConnBufs,
 ) !void {
     state: switch (BringUp{ .listen = {} }) {
-        .listen => continue :state transitionListen(io, addr),
+        .listen => continue :state transitionListen(io, addr, listen_addr),
         .accept => |s| continue :state transitionAccept(io, s.server, s.next, participants, n_layer, slaves, bufs),
         .ready => return,
         .failed => |e| {
@@ -171,12 +175,12 @@ fn bringUpMaster(
     }
 }
 
-fn transitionListen(io: std.Io, addr: net.IpAddress) BringUp {
+fn transitionListen(io: std.Io, addr: net.IpAddress, listen_addr: []const u8) BringUp {
     const server = addr.listen(io, .{ .reuse_address = true }) catch |e| {
-        log.err("master: listen on 127.0.0.1:{d} failed: {s}", .{ wire.PORT, @errorName(e) });
+        log.err("master: listen on {s}:{d} failed: {s}", .{ listen_addr, wire.PORT, @errorName(e) });
         return .{ .failed = e };
     };
-    log.info("master: listening on 127.0.0.1:{d}", .{wire.PORT});
+    log.info("master: listening on {s}:{d}", .{ listen_addr, wire.PORT });
     return .{ .accept = .{ .server = server, .next = 0 } };
 }
 
